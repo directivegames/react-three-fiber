@@ -15,9 +15,6 @@ import {
   dispose,
   is,
   prepare,
-  // WITH_GENESYS
-  releaseSceneR3fLinks,
-  // !WITH_GENESYS
   updateCamera,
   updateFrustum,
   useIsomorphicLayoutEffect,
@@ -813,6 +810,33 @@ function Provider<TCanvas extends HTMLCanvasElement | OffscreenCanvas>({
 }
 
 // WITH_GENESYS
+/**
+ * Break reconciler links on a root scene and its descendants.
+ * The root `Scene` is prepared once in `configure()` and never passes through `removeChild`,
+ * so `__r3f` (and `instance.root` → store) can outlive canvas unmount unless cleared here.
+ *
+ * @param scene - Root THREE.Scene for this canvas
+ * @param options.clearChildren - When true (default), calls `scene.clear()` after unlinking
+ * @returns The same scene reference for deferred property disposal
+ */
+function releaseSceneR3fLinks(
+  scene: THREE.Scene | null | undefined,
+  options?: { clearChildren?: boolean },
+): THREE.Scene | null {
+  if (!scene) return null
+
+  scene.traverse((obj) => {
+    delete (obj as any).__r3f
+  })
+  delete (scene as any).__r3f
+
+  if (options?.clearChildren !== false) {
+    scene.clear()
+  }
+
+  return scene
+}
+
 /**
  * Release store-held renderer refs as soon as unmount begins.
  * App-owned renderers (custom WebGPU factories) are disposed by the app; R3F must not

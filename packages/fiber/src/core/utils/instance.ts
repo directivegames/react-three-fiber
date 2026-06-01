@@ -93,35 +93,6 @@ export function dispose<T extends Disposable>(obj: T): void {
   }
 }
 
-// WITH_GENESYS
-/**
- * Break reconciler links on a root scene and its descendants.
- * The root `Scene` is prepared once in `configure()` and never passes through `removeChild`,
- * so `__r3f` (and `instance.root` → store) can outlive canvas unmount unless cleared here.
- *
- * @param scene - Root THREE.Scene for this canvas
- * @param options.clearChildren - When true (default), calls `scene.clear()` after unlinking
- * @returns The same scene reference for deferred property disposal
- */
-export function releaseSceneR3fLinks(
-  scene: THREE.Scene | null | undefined,
-  options?: { clearChildren?: boolean },
-): THREE.Scene | null {
-  if (!scene) return null
-
-  scene.traverse((obj) => {
-    delete (obj as Instance['object']).__r3f
-  })
-  delete (scene as Instance['object']).__r3f
-
-  if (options?.clearChildren !== false) {
-    scene.clear()
-  }
-
-  return scene
-}
-// !WITH_GENESYS
-
 /**
  * Extracts instance props from React reconciler fiber props.
  * Filters out React-internal props (children, key, ref).
