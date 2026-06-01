@@ -1,11 +1,5 @@
-// WITH_GENESYS
-import type * as THREE from 'three'
-import type { Args, ConstructorRepresentation, InstanceProps } from './reconciler'
-import type { EventHandlers } from './events'
-import type { Mutable, Overwrite } from './utils'
-// !WITH_GENESYS
-// import type * as THREE from '#three'
-// import type { Args, EventHandlers, InstanceProps, ConstructorRepresentation, Overwrite, Mutable } from '#types'
+import type * as THREE from '#three'
+import type { Args, EventHandlers, InstanceProps, ConstructorRepresentation, Overwrite, Mutable } from '#types'
 
 type MutableOrReadonlyParameters<T extends (...args: any) => any> = Parameters<T> | Readonly<Parameters<T>>
 
