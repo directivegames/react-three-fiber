@@ -234,7 +234,7 @@ importers:
         version: 7.28.6
       '@monogrid/gainmap-js':
         specifier: ^3.4.0
-        version: 3.4.0(three@0.181.2)
+        version: 3.4.0(three@0.184.0)
       dequal:
         specifier: ^2.0.3
         version: 2.0.3
@@ -257,8 +257,8 @@ importers:
         specifier: ^0.1.3
         version: 0.1.3(react@19.2.3)
       three:
-        specifier: '>=0.181.2'
-        version: 0.181.2
+        specifier: '>=0.184.0'
+        version: 0.184.0
       use-sync-external-store:
         specifier: ^1.6.0
         version: 1.6.0(react@19.2.3)
@@ -270,8 +270,8 @@ importers:
         specifier: ^0.32.3
         version: 0.32.3(@types/react@19.2.8)
       '@types/three':
-        specifier: ^0.181.0
-        version: 0.181.0
+        specifier: ^0.184.0
+        version: 0.184.1
       '@types/webxr':
         specifier: '*'
         version: 0.5.24
@@ -2115,6 +2115,9 @@ packages:
   '@types/three@0.181.0':
     resolution: {integrity: sha512-MLF1ks8yRM2k71D7RprFpDb9DOX0p22DbdPqT/uAkc6AtQXjxWCVDjCy23G9t1o8HcQPk7woD2NIyiaWcWPYmA==}
 
+  '@types/three@0.184.1':
+    resolution: {integrity: sha512-6q4VdiqVsrTRqmk62/BnlcAvIrnDM0zf2ZDVKI5kZiniWrSaOHaQzmbp+BNzoggc/8tgW412pL//wZIxu2PPTA==}
+
   '@types/webxr@0.5.24':
     resolution: {integrity: sha512-h8fgEd/DpoS9CBrjEQXR+dIDraopAEfu4wYVNY2tEPwk60stPWhvZMf4Foo5FakuQ7HFZoa8WceaWFervK2Ovg==}
 
@@ -3474,6 +3477,9 @@ packages:
   meshoptimizer@0.22.0:
     resolution: {integrity: sha512-IebiK79sqIy+E4EgOr+CAw+Ke8hAspXKzBd0JdgEmPHiAwmvEj2S4h1rfvo+o/BnfEYd/jAOg5IeeIjzlzSnDg==}
 
+  meshoptimizer@1.1.1:
+    resolution: {integrity: sha512-oRFNWJRDA/WTrVj7NWvqa5HqE1t9MYDj2VaWirQCzCCrAd2GHrqR/sQezCxiWATPNlKTcRaPRHPJwIRoPBAp5g==}
+
   micromatch@4.0.8:
     resolution: {integrity: sha512-PXwfBhYu0hBCPw8Dn0E+WDYb7af3dSLVWKi3HGv84IdF4TyFoC0ysxFd0Goxw7nSv4T/PzEJQxsYsEiFCKo2BA==}
     engines: {node: '>=8.6'}
@@ -4274,6 +4280,9 @@ packages:
 
   three@0.181.2:
     resolution: {integrity: sha512-k/CjiZ80bYss6Qs7/ex1TBlPD11whT9oKfT8oTGiHa34W4JRd1NiH/Tr1DbHWQ2/vMUypxksLnF2CfmlmM5XFQ==}
+
+  three@0.184.0:
+    resolution: {integrity: sha512-wtTRjG92pM5eUg/KuUnHsqSAlPM296brTOcLgMRqEeylYTh/CdtvKUvCyyCQTzFuStieWxvZb8mVTMvdPyUpxg==}
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -5975,6 +5984,11 @@ snapshots:
       promise-worker-transferable: 1.0.4
       three: 0.181.2
 
+  '@monogrid/gainmap-js@3.4.0(three@0.184.0)':
+    dependencies:
+      promise-worker-transferable: 1.0.4
+      three: 0.184.0
+
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
       '@nodelib/fs.stat': 2.0.5
@@ -6477,6 +6491,15 @@ snapshots:
       '@webgpu/types': 0.1.68
       fflate: 0.8.2
       meshoptimizer: 0.22.0
+
+  '@types/three@0.184.1':
+    dependencies:
+      '@dimforge/rapier3d-compat': 0.12.0
+      '@tweenjs/tween.js': 23.1.3
+      '@types/stats.js': 0.17.4
+      '@types/webxr': 0.5.24
+      fflate: 0.8.2
+      meshoptimizer: 1.1.1
 
   '@types/webxr@0.5.24': {}
 
@@ -8179,6 +8202,8 @@ snapshots:
 
   meshoptimizer@0.22.0: {}
 
+  meshoptimizer@1.1.1: {}
+
   micromatch@4.0.8:
     dependencies:
       braces: 3.0.3
@@ -9011,6 +9036,8 @@ snapshots:
       three: 0.181.2
 
   three@0.181.2: {}
+
+  three@0.184.0: {}
 
   tinybench@2.9.0: {}
 
