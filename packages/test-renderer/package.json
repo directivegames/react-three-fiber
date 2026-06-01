@@ -51,7 +51,7 @@
     }
   },
   "devDependencies": {
-    "@react-three/fiber": "workspace:*",
+    "@react-three/fiber": "workspace:@gnsx/react-three-fiber@*",
     "three": ">=0.181"
   }
 }

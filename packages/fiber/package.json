@@ -1,6 +1,6 @@
 {
-  "name": "@react-three/fiber",
-  "version": "10.0.0-alpha.2",
+  "name": "@gnsx/react-three-fiber",
+  "version": "10.0.1",
   "description": "A React renderer for Threejs",
   "keywords": [
     "react",
@@ -18,12 +18,12 @@
     "Dennis Smolek (https://github.com/dennissmolek)"
   ],
   "bugs": {
-    "url": "https://github.com/pmndrs/react-three-fiber/issues"
+    "url": "https://github.com/directivegames/react-three-fiber/issues"
   },
-  "homepage": "https://github.com/pmndrs/react-three-fiber#readme",
+  "homepage": "https://github.com/directivegames/react-three-fiber#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/pmndrs/react-three-fiber.git"
+    "url": "git+https://github.com/directivegames/react-three-fiber.git"
   },
   "collective": {
     "type": "opencollective",
