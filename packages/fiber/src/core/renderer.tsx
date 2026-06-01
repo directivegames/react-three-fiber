@@ -15,6 +15,9 @@ import {
   dispose,
   is,
   prepare,
+  // WITH_GENESYS
+  releaseSceneR3fLinks,
+  // !WITH_GENESYS
   updateCamera,
   updateFrustum,
   useIsomorphicLayoutEffect,
@@ -139,6 +142,11 @@ export function createRoot<TCanvas extends HTMLCanvasElement | OffscreenCanvas>(
 
   return {
     async configure(props: RenderProps<TCanvas> = {}): Promise<ReconcilerRoot<TCanvas>> {
+      // WITH_GENESYS
+      // Serialize overlapping configure() calls (Canvas layout effect re-runs while WebGPU init is in flight).
+      if (pending) await pending
+      // !WITH_GENESYS
+
       let resolve!: () => void
       pending = new Promise<void>((_resolve) => (resolve = _resolve))
 
@@ -620,8 +628,14 @@ export function createRoot<TCanvas extends HTMLCanvasElement | OffscreenCanvas>(
         const unregisterCanvasTarget = scheduler.register(
           () => {
             const state = store.getState()
+            // WITH_GENESYS
+            if (!state.internal.active) return
+            // !WITH_GENESYS
             if (state.internal.isMultiCanvas && state.internal.canvasTarget) {
               const renderer = state.internal.actualRenderer as WebGPURenderer
+              // WITH_GENESYS
+              if (!renderer) return
+              // !WITH_GENESYS
               renderer.setCanvasTarget(state.internal.canvasTarget)
             }
           },
@@ -688,7 +702,12 @@ export function createRoot<TCanvas extends HTMLCanvasElement | OffscreenCanvas>(
         const unregisterRender = scheduler.register(
           () => {
             const state = store.getState()
+            // WITH_GENESYS
+            if (!state.internal.active) return
             const renderer = state.internal.actualRenderer as WebGPURenderer
+            if (!renderer) return
+            // !WITH_GENESYS
+            // const renderer = state.internal.actualRenderer as WebGPURenderer
 
             // Skip if a user has taken over rendering by registering in the 'render' phase
             // Also check legacy priority system for backwards compatibility
@@ -793,6 +812,36 @@ function Provider<TCanvas extends HTMLCanvasElement | OffscreenCanvas>({
   return <context.Provider value={store}>{children}</context.Provider>
 }
 
+// WITH_GENESYS
+/**
+ * Release store-held renderer refs as soon as unmount begins.
+ * App-owned renderers (custom WebGPU factories) are disposed by the app; R3F must not
+ * keep `actualRenderer` alive while the scheduler may still tick.
+ *
+ * @returns The renderer that was held, for deferred WebGL/context cleanup.
+ */
+function releaseRendererRefsFromRootState(state: RootState): WebGLRenderer | WebGPURenderer | null {
+  const { internal } = state
+  const renderer = internal.actualRenderer ?? null
+  internal.actualRenderer = null as typeof internal.actualRenderer
+  internal.canvasTarget = null
+  internal.pointerMap?.clear()
+  internal.pointerDirty?.clear()
+  return renderer
+}
+
+/** Detach root scene from the store after the reconciler tree is torn down. */
+function detachRootSceneFromRootState(state: RootState): THREE.Scene | null {
+  const scene = releaseSceneR3fLinks(state.scene)
+  state.set((prev) => ({
+    scene: null as typeof prev.scene,
+    rootScene: null as typeof prev.rootScene,
+    internal: { ...prev.internal, container: null },
+  }))
+  return scene
+}
+// !WITH_GENESYS
+
 export function unmountComponentAtNode<TCanvas extends HTMLCanvasElement | OffscreenCanvas>(
   canvas: TCanvas,
   callback?: (canvas: TCanvas) => void,
@@ -801,24 +850,48 @@ export function unmountComponentAtNode<TCanvas extends HTMLCanvasElement | Offsc
   const fiber = root?.fiber
   if (fiber) {
     const state = root?.store.getState()
-    if (state) state.internal.active = false
+    // WITH_GENESYS
+    let rendererForCleanup: WebGLRenderer | WebGPURenderer | null = null
+    let canvasTargetForCleanup: { dispose?: () => void } | null | undefined
+    let sceneForCleanup: THREE.Scene | null = null
+
+    if (state) {
+      state.internal.active = false
+      canvasTargetForCleanup = state.internal.canvasTarget
+      rendererForCleanup = releaseRendererRefsFromRootState(state)
+
+      const unregisterRoot = (state.internal as any).unregisterRoot as (() => void) | undefined
+      if (unregisterRoot) {
+        unregisterRoot()
+        ;(state.internal as any).unregisterRoot = undefined
+      }
+    }
+    // !WITH_GENESYS
+    // if (state) state.internal.active = false
+
     reconciler.updateContainer(null, fiber, null, () => {
       if (state) {
+        // WITH_GENESYS
+        sceneForCleanup = detachRootSceneFromRootState(state)
+        // !WITH_GENESYS
+
         setTimeout(() => {
           try {
-            const renderer = state.internal.actualRenderer
-
-            // Unregister this root from the global scheduler
-            const unregisterRoot = (state.internal as any).unregisterRoot as (() => void) | undefined
-            if (unregisterRoot) unregisterRoot()
+            // WITH_GENESYS
+            const renderer = rendererForCleanup
+            // !WITH_GENESYS
+            // const renderer = state.internal.actualRenderer
 
             // Unregister primary canvas from registry (if it was registered)
             const unregisterPrimary = state.internal.unregisterPrimary
             if (unregisterPrimary) unregisterPrimary()
 
-            // Dispose CanvasTarget for secondary canvases
-            const canvasTarget = state.internal.canvasTarget
-            if (canvasTarget?.dispose) canvasTarget.dispose()
+            // WITH_GENESYS
+            // Dispose CanvasTarget for secondary canvases (captured before refs were released)
+            if (canvasTargetForCleanup?.dispose) canvasTargetForCleanup.dispose()
+            // !WITH_GENESYS
+            // const canvasTarget = state.internal.canvasTarget
+            // if (canvasTarget?.dispose) canvasTarget.dispose()
 
             state.events.disconnect?.()
             // Clean up occlusion system and helper group
@@ -833,7 +906,10 @@ export function unmountComponentAtNode<TCanvas extends HTMLCanvasElement | Offsc
             if (!state.internal.isSecondary) {
               if (renderer?.xr) state.xr.disconnect()
             }
-            dispose(state.scene)
+            // WITH_GENESYS
+            if (sceneForCleanup) dispose(sceneForCleanup)
+            // !WITH_GENESYS
+            // dispose(state.scene)
             _roots.delete(canvas)
             if (callback) callback(canvas)
           } catch {
