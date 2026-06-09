@@ -11,7 +11,11 @@ import type { Bridge, UnblockProps } from '#types'
  */
 // Reference with computed key to break Webpack static analysis
 // https://github.com/webpack/webpack/issues/14814
-export const act: typeof React.act = React[('act' + '') as 'act']
+
+// export const act: typeof React.act = React[('act' + '') as 'act']
+// WITH_GENESYS
+export const act = React.act
+// !WITH_GENESYS
 
 /**
  * An SSR-friendly useLayoutEffect.
