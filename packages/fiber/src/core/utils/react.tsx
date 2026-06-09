@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { act as reactAct } from 'react'
 import { useFiber, traverseFiber, useContextBridge } from 'its-fine'
 import type { Bridge, UnblockProps } from '#types'
 
@@ -14,7 +15,8 @@ import type { Bridge, UnblockProps } from '#types'
 
 // export const act: typeof React.act = React[('act' + '') as 'act']
 // WITH_GENESYS
-export const act = React.act
+// Named import: webpack cannot resolve `act` from `import * as React` (see webpack#14814).
+export const act = reactAct
 // !WITH_GENESYS
 
 /**
