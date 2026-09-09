@@ -17,7 +17,7 @@ on:
         required: false
         type: string
       tag:
-        description: 'npm dist-tag (leave empty for latest)'
+        description: 'npm dist-tag (leave empty for latest). Use a maintenance tag so latest is unchanged.'
         required: false
         default: ''
         type: string
