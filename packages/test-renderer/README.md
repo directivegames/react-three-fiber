@@ -32,11 +32,13 @@ Essentially, this package makes it easy to grab a snapshot of the Scene Graph re
 
 Choose the entry point that matches your `@react-three/fiber` import:
 
-| Your Fiber Import           | Test Renderer Import                | Use Case                             |
-| --------------------------- | ----------------------------------- | ------------------------------------ |
-| `@react-three/fiber`        | `@react-three/test-renderer`        | Default (WebGL with WebGPU fallback) |
-| `@react-three/fiber/legacy` | `@react-three/test-renderer/legacy` | WebGL only                           |
-| `@react-three/fiber/webgpu` | `@react-three/test-renderer/webgpu` | WebGPU with TSL hooks                |
+| Your Fiber Import           | Test Renderer Import                | Use Case                              |
+| --------------------------- | ----------------------------------- | ------------------------------------- |
+| `@react-three/fiber`        | `@react-three/test-renderer`        | Default (WebGPU, mocked GPU context)  |
+| `@react-three/fiber/legacy` | `@react-three/test-renderer/legacy` | WebGL only                            |
+| `@react-three/fiber/webgpu` | `@react-three/test-renderer/webgpu` | Deprecated, removed in the first beta |
+
+Whichever entry you pick, the root resolves JSX elements from the three namespace of the renderer it loads, exactly as in the app: node materials exist under WebGPU and not under WebGL.
 
 ### Default Entry
 
@@ -72,18 +74,16 @@ import { Canvas } from '@react-three/fiber/legacy'
 const renderer = await ReactThreeTestRenderer.create(<MyScene />)
 ```
 
-### WebGPU Entry
+### TSL (Three Shading Language)
 
-For applications using WebGPU with TSL (Three Shading Language):
+The default entry renders with `WebGPURenderer`, so node materials and the TSL hooks work without
+any setup. `@react-three/test-renderer/webgpu` does the same and is deprecated.
 
 ```tsx
-import ReactThreeTestRenderer, {
-  useUniform,
-  useUniforms,
-  useNodes,
-  useLocalNodes,
-} from '@react-three/test-renderer/webgpu'
-import { Canvas, useUniforms } from '@react-three/fiber/webgpu'
+import ReactThreeTestRenderer from '@react-three/test-renderer'
+import { color } from 'three/tsl'
+// The TSL hooks come from @react-three/tsl, in tests as in app code
+import { useUniforms, useNodes } from '@react-three/tsl'
 
 // Component using WebGPU hooks
 function MyWebGPUScene() {
@@ -134,23 +134,12 @@ console.log(renderer.toGraph())
 
 ## Testing WebGPU Hooks
 
-The `/webgpu` entry exports all WebGPU-specific hooks for testing TSL uniforms and nodes:
+Test TSL uniforms and nodes with the default entry and the hooks from `@react-three/tsl`:
 
 ```tsx
-import ReactThreeTestRenderer, {
-  useUniform,
-  useUniforms,
-  useNodes,
-  useLocalNodes,
-  // Cleanup utilities
-  removeUniforms,
-  clearScope,
-  clearRootUniforms,
-  removeNodes,
-  clearNodeScope,
-  clearRootNodes,
-} from '@react-three/test-renderer/webgpu'
-import { useThree } from '@react-three/fiber/webgpu'
+import ReactThreeTestRenderer from '@react-three/test-renderer'
+import { color } from 'three/tsl'
+import { useUniforms, useNodes } from '@react-three/tsl'
 
 describe('My WebGPU Scene', () => {
   it('should create and use uniforms', async () => {
@@ -200,29 +189,21 @@ describe('My WebGPU Scene', () => {
 
 ---
 
-## Migration from v8
+## Upgrading from v9
 
-If you're upgrading from v8 and using WebGPU features:
+v9 had one entry, which rendered with WebGL. In v10 the default entry renders with WebGPU, to match
+`@react-three/fiber`. If your app imports `Canvas` from `@react-three/fiber/legacy`, test with the
+`/legacy` entry:
 
 ```diff
-// Before (v8) - single entry point
 -import ReactThreeTestRenderer from '@react-three/test-renderer'
-
-// After (v9+) - choose matching entry
-// For WebGPU apps:
-+import ReactThreeTestRenderer from '@react-three/test-renderer/webgpu'
-
-// For legacy WebGL apps:
 +import ReactThreeTestRenderer from '@react-three/test-renderer/legacy'
-
-// For default (auto-detection):
-+import ReactThreeTestRenderer from '@react-three/test-renderer'
 ```
 
 ---
 
 ## API
 
-- [React Three Test Renderer API](/packages/test-renderer/markdown/rttr.md)
-- [React Three Test Instance API](/packages/test-renderer/markdown/rttr-instance.md)
-- [WebGPU Testing Guide](/packages/test-renderer/markdown/webgpu-testing.md)
+- [React Three Test Renderer API](./markdown/rttr.md)
+- [React Three Test Instance API](./markdown/rttr-instance.md)
+- [Testing WebGPU and TSL](https://r3f.docs.pmnd.rs/next/api/testing#testing-webgpu-and-tsl)

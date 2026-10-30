@@ -1,0 +1,286 @@
+---
+title: WebGPU Overview
+description: WebGPU and TSL support in react-three-fiber v10 - entry points, the renderer prop, and React-friendly hooks for Three.js Shading Language.
+nav: 13
+---
+
+react-three-fiber v10 brings first-class WebGPU support. The WebGPU hooks provide React-friendly APIs for Three.js Shading Language (TSL) development, solving the problem of managing shader state in a React component tree while keeping GPU-side performance.
+
+> **v10+ only.** The WebGPU hooks require React 19 and a WebGPU renderer.
+
+The TSL hooks ship in their own package, `@react-three/tsl`, next to `@react-three/fiber`:
+
+```bash
+npm install @react-three/fiber@alpha @react-three/tsl@alpha three
+```
+
+## Enabling WebGPU
+
+There is nothing to enable: `<Canvas>` from `@react-three/fiber` renders with `WebGPURenderer`. No manual renderer initialization is required - R3F handles it. Browser WebGPU support is not required either: `WebGPURenderer` falls back to a WebGL2 backend where the browser has none, and keeps speaking TSL.
+
+```tsx
+import { Canvas } from '@react-three/fiber'
+
+// WebGPURenderer with defaults
+<Canvas>
+  <Scene />
+</Canvas>
+
+// With renderer parameters
+<Canvas renderer={{ antialias: true, forceWebGL: false }}>
+  <Scene />
+</Canvas>
+
+// Or pass a pre-created renderer instance (still no init needed)
+<Canvas renderer={myWebGPURenderer}>
+  <Scene />
+</Canvas>
+```
+
+The renderer is exposed on R3F state as `renderer` (the v9 `gl` name is deprecated):
+
+```tsx
+useFrame(({ renderer, scene, camera }) => {
+  renderer.render(scene, camera)
+})
+```
+
+## Entry Points
+
+The import decides the renderer. `@react-three/fiber` renders with `WebGPURenderer`, loaded on demand: nothing of three is in your eager bundle, and three's WebGPU renderer and node system are a lazy chunk fetched when the first `<Canvas>` mounts. `WebGLRenderer` is only on `@react-three/fiber/legacy`; there is no prop that switches a Canvas from one to the other.
+
+| Import from                 | Renderer       | What you get                                                                                            |
+| --------------------------- | -------------- | ------------------------------------------------------------------------------------------------------- |
+| `@react-three/fiber`        | WebGPURenderer | Loaded on demand; node materials as JSX                                                                 |
+| `@react-three/fiber/webgpu` | WebGPURenderer | **Deprecated**, removed in the first beta. The same renderer, imported statically, typed against `WebGPURenderer` |
+| `@react-three/fiber/legacy` | WebGLRenderer  | No WebGPU code reachable; typed against `WebGLRenderer`; GLSL `ShaderMaterial`, `onBeforeCompile` and WebGL-only libraries |
+
+```tsx
+// WebGPU
+import { Canvas, useFrame } from '@react-three/fiber'
+import { useUniforms } from '@react-three/tsl'
+
+// WebGL - for GLSL shaders and libraries that need WebGLRenderer
+import { Canvas, useFrame } from '@react-three/fiber/legacy'
+```
+
+`@react-three/fiber/webgpu` was the WebGPU entry while the default import rendered with WebGL. It stays for the v10 alphas; import from `@react-three/fiber` instead, whose hooks are typed for WebGPU with nothing to register (see [Typing the renderer](../API/typescript#typing-the-renderer)).
+
+`WebGPURenderer` cannot compile GLSL. A `ShaderMaterial` or `RawShaderMaterial` on a WebGPU canvas renders as a blank default material, and R3F warns once in development, pointing here. Port the shader to a node material (TSL), or import from `/legacy`. Passing the WebGL `gl` prop to a `@react-three/fiber` Canvas throws for the same reason.
+
+All three share one core, so a library can import hooks from `@react-three/fiber` and work under a Canvas from any of them, `/legacy` included, without adding a renderer or a second copy of fiber to your app. The TSL hooks (`useUniforms`, `useNodes`, `useLocalNodes`, `useRenderPipeline`, `useBuffers`, `useGPUStorage`) come from `@react-three/tsl` and work under any Canvas that runs WebGPU.
+
+> **On the naming.** Three's `WebGPURenderer` is a slight misnomer — it is the renderer that speaks TSL, and WebGPU is only one of its backends. It can and does run on WebGL. So "WebGPU vs WebGL" is really two questions: which renderer (`WebGPURenderer` or the older `WebGLRenderer`), and which backend the former picks at runtime. R3F names the split by renderer, not backend: the new one is the default, the old one is `/legacy`. If you want the new renderer but not the WebGPU backend, that's `renderer={{ forceWebGL: true }}` — still TSL, still node materials.
+
+The split exists because `three` and `three/webgpu` are different bundles on one shared core, and there is no import that gives you the core alone: anything that imports `three` carries the WebGL renderer. Fiber's core imports neither; each renderer is loaded through a small support module, which is what keeps both renderers out of an app's eager bundle — see [BUILD.md](https://github.com/pmndrs/react-three-fiber/blob/v10/docs/development/BUILD.md).
+
+## Node Materials as JSX
+
+A root resolves JSX element names against the three namespace of the renderer it loaded. Under a WebGPU renderer that is `three/webgpu`, so node materials are available declaratively - no `extend()` call needed. (On `/legacy`, `<meshBasicNodeMaterial>` is not part of the namespace and throws an error naming the fix.)
+
+```tsx
+import { Canvas } from '@react-three/fiber'
+import { positionLocal, normalLocal } from 'three/tsl'
+
+function App() {
+  return (
+    <Canvas>
+      <mesh>
+        <sphereGeometry />
+        {/* MeshStandardNodeMaterial, MeshBasicNodeMaterial, etc. just work */}
+        <meshStandardNodeMaterial positionNode={positionLocal} />
+      </mesh>
+    </Canvas>
+  )
+}
+```
+
+## Quick Start
+
+### Uniforms
+
+```tsx
+import { useUniforms } from '@react-three/tsl'
+import { positionLocal, normalLocal } from 'three/tsl'
+
+function DisplacedSphere() {
+  const { uDisplacement } = useUniforms({ uDisplacement: 0.5 })
+
+  useFrame(({ elapsed }) => {
+    uDisplacement.value = Math.sin(elapsed)
+  })
+
+  return (
+    <mesh>
+      <sphereGeometry />
+      <meshStandardNodeMaterial positionNode={positionLocal.add(normalLocal.mul(uDisplacement))} />
+    </mesh>
+  )
+}
+```
+
+### Shared Nodes
+
+```tsx
+import { useNodes, useLocalNodes } from '@react-three/tsl'
+import { Fn, vec3, sin, time } from 'three/tsl'
+
+// Define shared nodes once
+function GlobalEffects() {
+  useNodes(() => ({
+    wobbleFn: Fn(() => vec3(sin(time), sin(time.mul(2)), sin(time.mul(3)))),
+  }))
+  return null
+}
+
+// Use in components
+function WobblyMesh() {
+  const { colorNode } = useLocalNodes(({ nodes }) => ({ colorNode: nodes.wobbleFn.mul(0.5).add(0.5) }), [])
+
+  return (
+    <mesh>
+      <sphereGeometry />
+      <meshBasicNodeMaterial colorNode={colorNode} />
+    </mesh>
+  )
+}
+```
+
+## Build-Time vs Run-Time
+
+The most important concept when using these hooks: **TSL code executes at two different times.**
+
+### Build-Time (JavaScript)
+
+A React component renders, JavaScript executes, and the shader node graph is built once.
+
+```tsx
+const { colorNode } = useLocalNodes(({ uniforms }) => {
+  // ❌ WRONG: JavaScript conditional runs ONCE at build, won't react to uniform changes
+  if (uniforms.uMode.value === 0) {
+    return { colorNode: vec3(1, 0, 0) }
+  }
+  return { colorNode: vec3(0, 0, 1) }
+}, [])
+```
+
+### Run-Time (GPU)
+
+Every frame the compiled shader executes on the GPU, reading current uniform values.
+
+```tsx
+import { If } from 'three/tsl'
+
+const { colorNode } = useLocalNodes(({ uniforms }) => {
+  // ✅ CORRECT: TSL If() runs on GPU every frame, reacts to uniform changes
+  const result = vec3(0).toVar()
+  If(uniforms.uMode.equal(0), () => {
+    result.assign(vec3(1, 0, 0))
+  }).Else(() => {
+    result.assign(vec3(0, 0, 1))
+  })
+  return { colorNode: result }
+}, [])
+```
+
+**Quick rule:**
+
+- JavaScript `if/else/for` - build-time only, won't react to uniform changes
+- TSL `If()/Loop()/select()` - run-time GPU code, reacts to uniform changes
+
+## Use TSL Built-ins First
+
+Before creating uniforms, check whether TSL already has a built-in node.
+
+### Camera
+
+```tsx
+import { cameraPosition } from 'three/tsl'
+
+// ✅ Use the TSL built-in
+const { colorNode } = useLocalNodes(() => ({ colorNode: length(cameraPosition.sub(positionWorld)) }), [])
+
+// ❌ Don't mirror state.camera into a uniform - redundant
+```
+
+Available TSL camera nodes: `cameraPosition`, `cameraViewMatrix`, `cameraProjectionMatrix`, `cameraNormalMatrix`, `cameraWorldMatrix`.
+
+### Time
+
+```tsx
+import { time } from 'three/tsl'
+
+// ✅ Use TSL's time node
+const { waveNode } = useLocalNodes(() => ({ waveNode: sin(time.mul(2)) }), [])
+
+// ❌ Don't create and drive a uTime uniform manually
+```
+
+### When to Use Canvas State
+
+Creators receive the canvas state, so you can derive uniforms for values that have no TSL built-in, such as viewport/size:
+
+```tsx
+const { uAspect, uDpr } = useUniforms((state) => ({
+  uAspect: state.size.width / state.size.height,
+  uDpr: state.viewport.dpr,
+}))
+```
+
+## Architecture
+
+Uniforms, nodes, buffers and GPU storage belong to the **renderer**, not to one canvas. They live on the primary canvas's `RootState`, which `@react-three/tsl` extends:
+
+```typescript
+// Added to RootState by @react-three/tsl
+interface RootState {
+  uniforms: AppUniforms // Global uniforms + scopes (typed by name once registered, loose otherwise)
+  nodes: AppNodes // Global TSL nodes + scopes (typed by name once registered, loose otherwise)
+  buffers: AppBuffers // GPU buffer storage + scopes (typed by name once registered)
+  gpuStorage: AppGPUStorage // GPU texture storage + scopes (typed by name once registered)
+  renderPipeline?: RenderPipeline | null // Per canvas, set by useRenderPipeline
+  passes?: PassRecord // Render pipeline passes
+}
+```
+
+A secondary canvas holds the primary's map objects, and portals inherit them from their parent (a portal's own scene, camera and `state`-prop fields stay its own), so `state.uniforms` reads the same everywhere: in `useFrame`, `useThree`, creators and event handlers, on any canvas or portal.
+
+```tsx
+useFrame(({ uniforms, elapsed }) => {
+  uniforms.uTime.value = elapsed
+})
+const uniforms = useThree((s) => s.uniforms)
+```
+
+To type uniforms, nodes, buffers and GPU storage by name across the app, see [Typed Resources](./typed-resources).
+
+### Create-If-Not-Exists
+
+All creator hooks use a "create if not exists, reuse if exists" pattern:
+
+```tsx
+// First call creates
+const { uTime } = useUniforms({ uTime: 0 })
+
+// Second call (any component) reuses the same uniform instance
+const { uTime } = useUniforms({ uTime: 0 })
+```
+
+This means no duplicate GPU allocations, shared state across the component tree, safe to call in multiple components, and compatibility with React Strict Mode.
+
+## Sections
+
+- [TSL Hooks](./tsl-hooks) - `useUniform`, `useUniforms`, `useNodes`, `useLocalNodes`, ScopedStore
+- [Render Pipeline](./render-pipeline) - `useRenderPipeline`, MRT, custom passes
+- [Compute (Buffers & Storage)](./compute) - `useBuffers`, `useGPUStorage`
+- [Textures](./textures) - `useTexture`, `useTextures`, the texture registry
+- [Typed Resources](./typed-resources) - `Register`, `configureTSL`
+- [Multi-Canvas](./multi-canvas) - sharing a renderer across canvases
+- [TSL HMR](./hmr) - what rebuilds on hot reload
+
+> Building GPU pipelines often pairs with the **texture registry** (`useTexture`/`useTextures`). Those are core hooks that work with any renderer — see [Textures](./textures).
+
+## External Resources
+
+- [Three.js TSL Docs](https://threejs.org/docs/#manual/en/introduction/WebGPU-TSL)
+- [WebGPU Renderer](https://threejs.org/docs/#api/en/renderers/WebGPURenderer)

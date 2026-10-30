@@ -1,17 +1,10 @@
 import { vi } from 'vitest'
 import * as React from 'react'
 import { render, fireEvent, RenderResult, createEvent } from '@testing-library/react'
-async function act<T>(fn: () => Promise<T>) {
-  const value = await fn()
-  // Wait for R3F's initialization and frame loop
-  await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => res(null))))
-  return value
-}
-import { Canvas, extend } from '../src'
-import * as THREE from '#three'
+import { act } from './utils/act'
+import { Canvas, extend } from '../src/legacy'
+import * as THREE from 'three'
 import type { RootState } from '#types'
-
-extend(THREE as any)
 
 const getContainer = () => document.querySelector('canvas') as HTMLCanvasElement
 
@@ -45,6 +38,48 @@ describe('events', () => {
     })
 
     expect(handlePointerDown).toHaveBeenCalled()
+  })
+
+  // Regression for #3778: when an element's `args` change, R3F reconstructs the underlying
+  // THREE object (swapInstances). The new object must be re-registered in the interaction
+  // manager, or pointer events silently stop working after the first reconstruction.
+  it('keeps pointer events working after an args-triggered reconstruction', async () => {
+    const handlePointerDown = vi.fn()
+    let setSwap: (v: boolean) => void = () => {}
+
+    function Scene() {
+      const [swap, _setSwap] = React.useState(false)
+      setSwap = _setSwap
+      // Geometry identity changes once → mesh args change → reconstruction
+      const geometry = React.useMemo(() => new THREE.BoxGeometry(2, 2, 2), [swap])
+      const material = React.useMemo(() => new THREE.MeshBasicMaterial(), [])
+      return <mesh args={[geometry, material]} onPointerDown={handlePointerDown} />
+    }
+
+    await act(async () => {
+      render(
+        <Canvas>
+          <Scene />
+        </Canvas>,
+      )
+    })
+
+    // Works before reconstruction
+    await act(async () => {
+      fireEvent(getContainer(), createPointerEvent('pointerdown'))
+    })
+    expect(handlePointerDown).toHaveBeenCalledTimes(1)
+
+    // Force the args change that reconstructs the mesh
+    await act(async () => {
+      setSwap(true)
+    })
+
+    // Must still fire after reconstruction
+    await act(async () => {
+      fireEvent(getContainer(), createPointerEvent('pointerdown'))
+    })
+    expect(handlePointerDown).toHaveBeenCalledTimes(2)
   })
 
   it('can handle onPointerMissed', async () => {
@@ -422,6 +457,142 @@ describe('events', () => {
     expect(handleClickRear).not.toHaveBeenCalled()
   })
 
+  describe('interactivity across reconstruction', () => {
+    const geometry = new THREE.BoxGeometry(2, 2)
+
+    function SwapApp({ material, ...handlers }: { material: THREE.Material } & Record<string, unknown>) {
+      return (
+        <Canvas>
+          <mesh args={[geometry, material]} {...handlers} />
+        </Canvas>
+      )
+    }
+
+    it('keeps firing events after an args change reconstructs the instance', async () => {
+      const handleClick = vi.fn()
+      const materialA = new THREE.MeshBasicMaterial()
+      const materialB = new THREE.MeshBasicMaterial()
+
+      let result: RenderResult = null!
+      await act(async () => {
+        result = render(<SwapApp material={materialA} onClick={handleClick} />)
+      })
+      await act(async () => {
+        result.rerender(<SwapApp material={materialB} onClick={handleClick} />)
+      })
+
+      const canvas = getContainer()
+      fireEvent(canvas, createPointerEvent('pointerdown'))
+      fireEvent(canvas, createPointerEvent('pointerup'))
+      fireEvent(canvas, createPointerEvent('click'))
+
+      expect(handleClick).toHaveBeenCalledTimes(1)
+    })
+
+    it('re-registers events when a primitive object prop is swapped', async () => {
+      const handleClick = vi.fn()
+      const meshA = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+      const meshB = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial())
+
+      function App({ object }: { object: THREE.Object3D }) {
+        return (
+          <Canvas>
+            <primitive object={object} onClick={handleClick} />
+          </Canvas>
+        )
+      }
+
+      let result: RenderResult = null!
+      await act(async () => {
+        result = render(<App object={meshA} />)
+      })
+
+      // Swapping the underlying THREE object reconstructs the instance the same way an args
+      // change does, so the replacement must inherit the interaction registration.
+      await act(async () => {
+        result.rerender(<App object={meshB} />)
+      })
+
+      const canvas = getContainer()
+      fireEvent(canvas, createPointerEvent('pointerdown'))
+      fireEvent(canvas, createPointerEvent('pointerup'))
+      fireEvent(canvas, createPointerEvent('click'))
+
+      expect(handleClick).toHaveBeenCalledTimes(1)
+      expect(handleClick.mock.calls[0][0].eventObject).toBe(meshB)
+    })
+
+    it('does not re-enter a hovered object when the instance is swapped underneath it', async () => {
+      const handlePointerEnter = vi.fn()
+      const handlePointerLeave = vi.fn()
+      const materialA = new THREE.MeshBasicMaterial()
+      const materialB = new THREE.MeshBasicMaterial()
+      const handlers = { onPointerEnter: handlePointerEnter, onPointerLeave: handlePointerLeave }
+
+      let result: RenderResult = null!
+      await act(async () => {
+        result = render(<SwapApp material={materialA} {...handlers} />)
+      })
+
+      const canvas = getContainer()
+      await act(async () => {
+        canvas.dispatchEvent(createPointerEvent('pointermove'))
+      })
+      expect(handlePointerEnter).toHaveBeenCalledTimes(1)
+
+      // The pointer has not moved. Reconstructing the object beneath it is an implementation
+      // detail, and must not surface as the pointer leaving and re-entering. Before
+      // swapInteractivity the hover entry was discarded here, so the next move re-fired enter --
+      // without a matching leave, leaving the pair unbalanced.
+      await act(async () => {
+        result.rerender(<SwapApp material={materialB} {...handlers} />)
+      })
+      await act(async () => {
+        canvas.dispatchEvent(createPointerEvent('pointermove'))
+      })
+
+      expect(handlePointerEnter).toHaveBeenCalledTimes(1)
+      expect(handlePointerLeave).not.toHaveBeenCalled()
+    })
+
+    it('keeps an active pointer capture alive across reconstruction', async () => {
+      const handlePointerDown = vi.fn((ev: any) => ev.target.setPointerCapture(ev.pointerId))
+      const handlePointerMove = vi.fn()
+      const materialA = new THREE.MeshBasicMaterial()
+      const materialB = new THREE.MeshBasicMaterial()
+      const handlers = { onPointerDown: handlePointerDown, onPointerMove: handlePointerMove }
+
+      let result: RenderResult = null!
+      await act(async () => {
+        result = render(<SwapApp material={materialA} {...handlers} />)
+      })
+
+      const canvas = getContainer()
+      await act(async () => {
+        canvas.dispatchEvent(createPointerEvent('pointerdown'))
+      })
+      expect(handlePointerDown).toHaveBeenCalledTimes(1)
+
+      // Reconstruct mid-drag, then move well off the mesh. Only a live capture keeps delivering
+      // there -- without one the pointer misses everything and the drag dies silently.
+      //
+      // Re-keying `captured` is not enough on its own: `PointerCaptureTarget` carries its own
+      // `intersection`, and that is what gets replayed into the hit list on every later event. Left
+      // pointing at the discarded object, the replayed hit resolves to something whose `__r3f` link
+      // has been severed.
+      await act(async () => {
+        result.rerender(<SwapApp material={materialB} {...handlers} />)
+      })
+
+      handlePointerMove.mockClear()
+      await act(async () => {
+        canvas.dispatchEvent(createPointerEvent('pointermove', { offsetX: 5, offsetY: 5, clientX: 5, clientY: 5 }))
+      })
+
+      expect(handlePointerMove).toHaveBeenCalled()
+    })
+  })
+
   describe('web pointer capture', () => {
     const handlePointerMove = vi.fn()
     const handlePointerDown = vi.fn((ev) => (ev.target as any).setPointerCapture(ev.pointerId))
@@ -449,6 +620,81 @@ describe('events', () => {
     }
 
     const pointerId = 1234
+
+    describe('when the instance is reconstructed mid-capture', () => {
+      const geometry = new THREE.BoxGeometry(2, 2)
+      const materialA = new THREE.MeshBasicMaterial()
+      const materialB = new THREE.MeshBasicMaterial()
+
+      async function captureThenSwap(App: React.FC<{ material: THREE.Material }>, onMove: ReturnType<typeof vi.fn>) {
+        let result: RenderResult = null!
+        await act(async () => {
+          result = render(<App material={materialA} />)
+        })
+
+        const canvas = getContainer()
+        canvas.setPointerCapture = vi.fn()
+        canvas.releasePointerCapture = vi.fn()
+
+        const down = createPointerEvent('pointerdown', { pointerId })
+        await act(async () => canvas.dispatchEvent(down))
+        expect(canvas.setPointerCapture).toHaveBeenCalledWith(pointerId)
+
+        // Reconstruct the mesh via an args change while the pointer is captured
+        await act(async () => result.rerender(<App material={materialB} />))
+
+        // Moving off the mesh must still reach the capturing handler
+        const moveOut = createPointerEvent('pointermove', {
+          pointerId,
+          offsetX: -10000,
+          offsetY: -10000,
+          clientX: -10000,
+          clientY: -10000,
+        })
+        await act(async () => canvas.dispatchEvent(moveOut))
+
+        expect(onMove).toHaveBeenCalledTimes(1)
+        return onMove.mock.calls[0][0] as any
+      }
+
+      it('keeps the capture on the reconstructed instance', async () => {
+        const onMove = vi.fn()
+
+        function App({ material }: { material: THREE.Material }) {
+          return (
+            <Canvas>
+              <mesh
+                args={[geometry, material]}
+                onPointerDown={(e) => (e.target as any).setPointerCapture(e.pointerId)}
+                onPointerMove={onMove}
+              />
+            </Canvas>
+          )
+        }
+
+        const event = await captureThenSwap(App, onMove)
+        expect((event.eventObject as THREE.Mesh).material).toBe(materialB)
+        expect((event.object as THREE.Mesh).material).toBe(materialB)
+      })
+
+      it('keeps the capture when a child of the capturing object is reconstructed', async () => {
+        const onMove = vi.fn()
+
+        function App({ material }: { material: THREE.Material }) {
+          return (
+            <Canvas>
+              <group onPointerDown={(e) => (e.target as any).setPointerCapture(e.pointerId)} onPointerMove={onMove}>
+                <mesh args={[geometry, material]} />
+              </group>
+            </Canvas>
+          )
+        }
+
+        const event = await captureThenSwap(App, onMove)
+        expect(event.eventObject).toBeInstanceOf(THREE.Group)
+        expect((event.object as THREE.Mesh).material).toBe(materialB)
+      })
+    })
 
     it('should release when the capture target is unmounted', async () => {
       let renderResult: RenderResult = undefined!
@@ -634,7 +880,48 @@ describe('events', () => {
     expect(handlePointerDown).toHaveBeenCalled()
   })
 
-  it.todo('can handle different event prefixes')
+  it('can handle different event prefixes', async () => {
+    // Exercises the DOM_EVENTS name mapping: onContextMenu->contextmenu,
+    // onDoubleClick->dblclick, onWheel->wheel all route to the right R3F handler.
+    const handleContextMenu = vi.fn()
+    const handleDoubleClick = vi.fn()
+    const handleWheel = vi.fn()
+
+    await act(async () => {
+      render(
+        <Canvas>
+          <mesh onContextMenu={handleContextMenu} onDoubleClick={handleDoubleClick} onWheel={handleWheel}>
+            <boxGeometry args={[2, 2]} />
+            <meshBasicMaterial />
+          </mesh>
+        </Canvas>,
+      )
+    })
+
+    const at = { clientX: 577, clientY: 480, offsetX: 577, offsetY: 480 }
+
+    // contextmenu is a click-type event: it needs a preceding pointerdown to record initialHits
+    await act(async () => {
+      fireEvent(getContainer(), createPointerEvent('pointerdown', at))
+      fireEvent(getContainer(), createPointerEvent('pointerup', at))
+      fireEvent(getContainer(), createPointerEvent('contextmenu', at))
+    })
+    expect(handleContextMenu).toHaveBeenCalled()
+
+    // dblclick is likewise a click-type event
+    await act(async () => {
+      fireEvent(getContainer(), createPointerEvent('pointerdown', at))
+      fireEvent(getContainer(), createPointerEvent('pointerup', at))
+      fireEvent(getContainer(), createPointerEvent('dblclick', at))
+    })
+    expect(handleDoubleClick).toHaveBeenCalled()
+
+    // wheel fires immediately with the default alwaysFireOnScroll
+    await act(async () => {
+      fireEvent(getContainer(), createPointerEvent('wheel', at))
+    })
+    expect(handleWheel).toHaveBeenCalled()
+  })
 
   //* Frame-Timed Raycasting Tests ==============================
 

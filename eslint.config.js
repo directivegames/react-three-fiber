@@ -10,7 +10,7 @@ import globals from 'globals'
 // Try to import the local eslint plugin if built
 let reactThreePlugin
 try {
-  reactThreePlugin = await import('./packages/eslint-plugin/dist/index.mjs')
+  reactThreePlugin = (await import('./packages/eslint-plugin/dist/index.mjs')).default
 } catch {
   // Plugin not built yet, skip
 }
@@ -107,6 +107,8 @@ export default [
       '@typescript-eslint/no-use-before-define': 'off',
       '@typescript-eslint/no-empty-function': 'off',
       '@typescript-eslint/no-empty-interface': 'off',
+      // Each entry augments react's JSX.IntrinsicElements with its own element map
+      '@typescript-eslint/no-namespace': ['error', { allowDeclarations: true }],
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-empty-object-type': 'off',
       '@typescript-eslint/no-require-imports': 'off',
@@ -130,6 +132,8 @@ export default [
       'vitest/no-identical-title': 'error',
       'vitest/prefer-to-have-length': 'warn',
       'vitest/valid-expect': 'error',
+      // Helpers named expect* assert too (the Tier-3 suite's expectColor, expectCleanFrame)
+      'vitest/expect-expect': ['error', { assertFunctionNames: ['expect', 'expect*', 'assert'] }],
     },
   },
 ]

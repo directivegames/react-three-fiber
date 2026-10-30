@@ -17,9 +17,9 @@
 //* Default Entry Point Tests ==============================
 
 describe('Entry Point: Default (@react-three/fiber)', () => {
-  it('should export R3F_BUILD_LEGACY as true', async () => {
+  it('should export R3F_BUILD_LEGACY as false (WebGL is on /legacy)', async () => {
     const fiber = await import('@react-three/fiber')
-    expect(fiber.R3F_BUILD_LEGACY).toBe(true)
+    expect(fiber.R3F_BUILD_LEGACY).toBe(false)
   })
 
   it('should export R3F_BUILD_WEBGPU as true', async () => {
@@ -121,10 +121,11 @@ describe('Entry Point: WebGPU (@react-three/fiber/webgpu)', () => {
     expect(typeof webgpu.extend).toBe('function')
   })
 
-  it('should export WebGPU-specific hooks', () => {
+  it('no longer exports the TSL resource hooks (they live in @react-three/tsl)', () => {
     if (!webgpu) return
-    expect(typeof webgpu.useUniforms).toBe('function')
-    expect(typeof webgpu.useUniform).toBe('function')
+    expect(webgpu.useUniforms).toBeUndefined()
+    expect(webgpu.useUniform).toBeUndefined()
+    expect(webgpu.useRenderPipeline).toBeUndefined()
   })
 
   it('should export useRenderTarget hook', () => {

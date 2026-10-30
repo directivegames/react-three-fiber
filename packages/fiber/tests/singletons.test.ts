@@ -15,11 +15,14 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import * as React from 'react'
+import { act } from 'react'
+import * as THREE from 'three'
 
 //* Symbol keys used by the singleton pattern ==============================
 const CONTEXT_KEY = Symbol.for('@react-three/fiber.context')
-const SCHEDULER_KEY = Symbol.for('@react-three/fiber.scheduler')
 const CATALOGUE_KEY = Symbol.for('@react-three/fiber.catalogue')
+const EXTEND_ID_KEY = Symbol.for('@react-three/fiber.extendId')
 
 describe('Cross-bundle singleton sharing', () => {
   //* Setup: Clear global singletons before each test ==============================
@@ -27,8 +30,8 @@ describe('Cross-bundle singleton sharing', () => {
   beforeEach(() => {
     // Clear any existing global singletons
     delete (globalThis as any)[CONTEXT_KEY]
-    delete (globalThis as any)[SCHEDULER_KEY]
     delete (globalThis as any)[CATALOGUE_KEY]
+    delete (globalThis as any)[EXTEND_ID_KEY]
   })
 
   //* Context Tests ==============================
@@ -50,52 +53,15 @@ describe('Cross-bundle singleton sharing', () => {
     })
   })
 
-  //* Scheduler Tests ==============================
-  describe('Scheduler', () => {
-    it('scheduler instance should be shared across module reloads', async () => {
-      // First "bundle" load
-      vi.resetModules()
-      const schedulerModA = await import('../src/core/hooks/useFrame/scheduler')
-      const schedulerA = schedulerModA.getScheduler()
-
-      // Second "bundle" load
-      vi.resetModules()
-      const schedulerModB = await import('../src/core/hooks/useFrame/scheduler')
-      const schedulerB = schedulerModB.getScheduler()
-
-      // Without Symbol.for() singleton pattern, these will be different instances
-      // With the fix, they should be the exact same instance
-      expect(schedulerA).toBe(schedulerB)
-    })
-
-    it('scheduler should maintain state across module reloads', async () => {
-      // First "bundle" load - register a root
-      vi.resetModules()
-      const schedulerModA = await import('../src/core/hooks/useFrame/scheduler')
-      const schedulerA = schedulerModA.getScheduler()
-      const rootId = schedulerA.generateRootId()
-
-      // Second "bundle" load - should see the same state
-      vi.resetModules()
-      const schedulerModB = await import('../src/core/hooks/useFrame/scheduler')
-      const schedulerB = schedulerModB.getScheduler()
-
-      // If singletons work, the second instance should have the same rootIdCounter
-      // We can verify by generating another ID and checking it incremented
-      const nextRootId = schedulerB.generateRootId()
-
-      // If they're the same instance, IDs should be sequential
-      // If different instances, nextRootId would be the same as rootId
-      expect(nextRootId).not.toBe(rootId)
-    })
-  })
+  // Note: the scheduler singleton is now owned by @pmndrs/scheduler and is
+  // covered by that package's own cross-bundle tests.
 
   //* Catalogue Tests ==============================
   describe('Catalogue (extend registry)', () => {
     it('catalogue should be shared across module reloads', async () => {
       // First "bundle" load - extend with a test component
       vi.resetModules()
-      const reconcilerA = await import('../src/core/reconciler')
+      const reconcilerA = await import('../src/core/extend')
 
       // Create a test class to extend
       class TestComponent {}
@@ -103,7 +69,7 @@ describe('Cross-bundle singleton sharing', () => {
 
       // Second "bundle" load - should see the extended component
       vi.resetModules()
-      const reconcilerB = await import('../src/core/reconciler')
+      const reconcilerB = await import('../src/core/extend')
 
       // Try extending with another component to verify catalogue is accessible
       class AnotherComponent {}
@@ -111,15 +77,12 @@ describe('Cross-bundle singleton sharing', () => {
 
       // Load a third time to verify both components are present
       vi.resetModules()
-      const reconcilerC = await import('../src/core/reconciler')
+      const reconcilerC = await import('../src/core/extend')
 
-      // If catalogue is shared, extending from any bundle should work globally
-      // We can't directly access catalogue (it's not exported), but we can verify
-      // by checking that extend doesn't throw and the module loads correctly
       expect(reconcilerC.extend).toBeDefined()
-
-      // The real test is that if we had JSX rendering, components extended from
-      // bundle A would be available when rendering from bundle B
+      const catalogue = (globalThis as any)[CATALOGUE_KEY]
+      expect(catalogue.TestComponent).toBe(TestComponent)
+      expect(catalogue.AnotherComponent).toBe(AnotherComponent)
     })
 
     it('extend from one bundle should be visible to another bundle', async () => {
@@ -128,7 +91,7 @@ describe('Cross-bundle singleton sharing', () => {
 
       // First "bundle" load - extend with a test component
       vi.resetModules()
-      const reconcilerA = await import('../src/core/reconciler')
+      const reconcilerA = await import('../src/core/extend')
 
       class UniqueTestClass {}
       reconcilerA.extend({ UniqueTestClass })
@@ -141,9 +104,81 @@ describe('Cross-bundle singleton sharing', () => {
       if (catalogue) {
         expect(catalogue.UniqueTestClass).toBe(UniqueTestClass)
       } else {
-        // If catalogue is not global, this test should fail
-        // This is expected before the fix is applied
         expect(catalogue).toBeDefined()
+      }
+    })
+
+    it('factory extend() ids never collide across bundles', async () => {
+      // Generated element IDs must remain unique across module instances.
+      vi.resetModules()
+      const reconcilerA = await import('../src/core/extend')
+      class FromBundleA {}
+      const idA = reconcilerA.extend(FromBundleA) as unknown as string
+
+      vi.resetModules()
+      const reconcilerB = await import('../src/core/extend')
+      class FromBundleB {}
+      const idB = reconcilerB.extend(FromBundleB) as unknown as string
+
+      expect(idA).not.toBe(idB)
+      const catalogue = (globalThis as any)[CATALOGUE_KEY]
+      expect(catalogue[idA]).toBe(FromBundleA)
+      expect(catalogue[idB]).toBe(FromBundleB)
+    })
+
+    it('factory extend() skips catalogue ids a pre-shared-counter bundle already took', async () => {
+      // A copy of R3F from before the shared counter (v10 alphas) keeps a module-local `let i = 0`
+      // and writes `catalogue['0']` without ever touching EXTEND_ID. Simulate that bundle by seeding
+      // the shared catalogue directly, then check the current extend() lands on the next free slot.
+      vi.resetModules()
+      const current = await import('../src/core/extend')
+      const catalogue = (globalThis as any)[CATALOGUE_KEY]
+
+      class FromOldBundle {}
+      catalogue['0'] = FromOldBundle
+      expect((globalThis as any)[EXTEND_ID_KEY]).toBeUndefined()
+
+      class FromNewBundle {}
+      const id = current.extend(FromNewBundle) as unknown as string
+
+      expect(id).toBe('1')
+      expect(catalogue['0']).toBe(FromOldBundle)
+      expect(catalogue['1']).toBe(FromNewBundle)
+      expect((globalThis as any)[EXTEND_ID_KEY]).toBe(2)
+    })
+
+    it('a reconciler from bundle B instantiates the class bundle A registered with extend()', async () => {
+      // Regression for the pre-fix failure mode: each bundle counted from 0, so bundle B's factory
+      // id overwrote bundle A's slot and rendering A's element constructed B's class. Go through
+      // the real reconciler (createInstance) rather than only inspecting catalogue slots.
+      class FromBundleA extends THREE.Object3D {}
+      class FromBundleB extends THREE.Object3D {}
+
+      vi.resetModules()
+      const bundleA = await import('../src/core/extend')
+      const ElementA = bundleA.extend(FromBundleA)
+
+      vi.resetModules()
+      const bundleB = await import('../src/index')
+      const ElementB = bundleB.extend(FromBundleB)
+
+      const root = bundleB.createRoot(document.createElement('canvas'))
+      try {
+        const store = await act(async () =>
+          root.render(
+            React.createElement(
+              React.Fragment,
+              null,
+              React.createElement(ElementA, { name: 'a' }),
+              React.createElement(ElementB, { name: 'b' }),
+            ),
+          ),
+        )
+        const { scene } = store.getState()
+        expect(scene.getObjectByName('a')).toBeInstanceOf(FromBundleA)
+        expect(scene.getObjectByName('b')).toBeInstanceOf(FromBundleB)
+      } finally {
+        await act(async () => root.unmount())
       }
     })
   })

@@ -1,33 +1,36 @@
 /**
- * @fileoverview Default Entry Point - WebGL/WebGPU Auto-Detection
+ * @fileoverview Default Entry Point - WebGPU
  *
  * Use this entry point when testing applications that use:
  *   import { Canvas } from '@react-three/fiber'
  *
- * This is the default entry that works with the standard fiber import.
- * For WebGPU-specific hook testing, use '@react-three/test-renderer/webgpu'.
- * For legacy WebGL-only testing, use '@react-three/test-renderer/legacy'.
+ * `@react-three/fiber` renders with WebGPURenderer, so this entry mocks WebGPU and creates
+ * WebGPU-mode canvases, like '@react-three/test-renderer/webgpu'.
+ * For WebGL-only testing (`@react-three/fiber/legacy`), use '@react-three/test-renderer/legacy'.
  *
  * Usage:
  *   import ReactThreeTestRenderer from '@react-three/test-renderer'
  */
 
-import * as THREE from 'three'
-import { extend, _roots as mockRoots, createRoot, reconciler, act } from '@react-three/fiber'
+import { act } from 'react'
+import { _roots as mockRoots, createRoot, reconciler } from '@react-three/fiber'
 
+import { mockWebGPU } from './WebGPUContext'
 import { createTestRenderer } from './createRenderer'
 import { waitFor, type WaitOptions } from './helpers/waitFor'
+
+//* Initialize WebGPU Mocking ==============================
+// Install mocks before any WebGPU code runs
+mockWebGPU()
 
 //* Initialize Test Renderer ==============================
 
 const renderer = createTestRenderer({
-  THREE,
   createRoot,
   mockRoots,
   reconciler,
   act,
-  extend,
-  mode: 'webgl', // Default uses WebGL context
+  mode: 'webgpu', // The root entry renders with WebGPURenderer
 })
 
 //* Exports ==============================

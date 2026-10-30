@@ -2,6 +2,7 @@ import type * as React from 'react'
 import type { Scene, Color, ColorRepresentation } from 'three'
 import type { RootStore } from './store'
 import type { EventHandlers } from './events'
+import type { RenderProps } from './renderer'
 import type { IsAllOptional } from './utils'
 
 //* Reconciler Types ==============================
@@ -10,9 +11,23 @@ import type { IsAllOptional } from './utils'
 // to avoid bundling @types/react-reconciler which causes absolute path issues
 type FiberRoot = any
 
+/** A promise tagged with its state, the protocol React's `use` reads */
+export type TrackedPromise<T> = Promise<T> &
+  ({ status: 'pending' } | { status: 'fulfilled'; value: T } | { status: 'rejected'; reason: unknown })
+
 export interface Root {
   fiber: FiberRoot
   store: RootStore
+  state:
+    | { status: 'open' }
+    | { status: 'closing'; token: symbol; settled: Promise<void>; settle: () => void }
+    | { status: 'disposed' }
+  configuration: {
+    previous?: RenderProps<HTMLCanvasElement | OffscreenCanvas>
+    apply: (props: RenderProps<HTMLCanvasElement | OffscreenCanvas>) => void
+  }
+  /** Settles once all accepted configuration has been applied */
+  ready: TrackedPromise<unknown>
 }
 
 export type AttachFnType<O = any> = (parent: any, self: O) => () => void
@@ -43,7 +58,6 @@ export type InstanceProps<T = any, P = any> = ArgsProp<P> & {
   object?: T
   dispose?: null
   attach?: AttachType<T>
-  onUpdate?: (self: T) => void
 }
 
 export interface Instance<O = any> {
@@ -57,9 +71,8 @@ export interface Instance<O = any> {
   handlers: Partial<EventHandlers>
   attach?: AttachType<O>
   previousAttach?: any
+  previousVisible: boolean | undefined
   isHidden: boolean
-  /** Deferred ref props to apply in commitMount */
-  deferredRefs?: Array<{ prop: string; ref: React.RefObject<any> }>
   /** Set of props that have been applied via once() */
   appliedOnce?: Set<string>
 }

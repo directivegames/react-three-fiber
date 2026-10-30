@@ -1,429 +1,12 @@
+import { vi } from 'vitest'
 import * as React from 'react'
 import { act } from 'react'
 import * as THREE from 'three'
+import { render, cleanup } from '@testing-library/react'
+import { getScheduler, Scheduler } from '@pmndrs/scheduler'
 import { createCanvas } from '../../test-renderer/src/createTestCanvas'
 
-import { createRoot, useThree, extend, useFrame } from '../src'
-import { Scheduler } from '../src/core/hooks/useFrame/scheduler'
-import { PhaseGraph } from '../src/core/hooks/useFrame/phaseGraph'
-import { rebuildSortedJobs } from '../src/core/hooks/useFrame/sorter'
-import { shouldRun } from '../src/core/hooks/useFrame/rateLimiter'
-
-extend(THREE as any)
-
-//* PhaseGraph Tests ==============================
-
-describe('PhaseGraph', () => {
-  it('initializes with default phases', () => {
-    const graph = new PhaseGraph()
-    const phases = graph.getOrderedPhases()
-
-    expect(phases).toEqual(['start', 'input', 'physics', 'update', 'render', 'finish'])
-  })
-
-  it('adds phase before another phase', () => {
-    const graph = new PhaseGraph()
-    graph.addPhase('clouds', { before: 'render' })
-    const phases = graph.getOrderedPhases()
-
-    expect(phases).toEqual(['start', 'input', 'physics', 'update', 'clouds', 'render', 'finish'])
-  })
-
-  it('adds phase after another phase', () => {
-    const graph = new PhaseGraph()
-    graph.addPhase('postFx', { after: 'render' })
-    const phases = graph.getOrderedPhases()
-
-    expect(phases).toEqual(['start', 'input', 'physics', 'update', 'render', 'postFx', 'finish'])
-  })
-
-  it('prevents duplicate phases', () => {
-    const graph = new PhaseGraph()
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    graph.addPhase('update', { before: 'render' })
-
-    expect(warnSpy).toHaveBeenCalledWith('[useFrame] Phase "update" already exists')
-    expect(graph.getOrderedPhases().filter((p) => p === 'update').length).toBe(1)
-
-    warnSpy.mockRestore()
-  })
-
-  it('resolves constraint phase for before constraint', () => {
-    const graph = new PhaseGraph()
-    const phase = graph.resolveConstraintPhase('render', undefined)
-
-    expect(phase).toBe('before:render')
-    expect(graph.hasPhase('before:render')).toBe(true)
-    // Should be inserted before render
-    const phases = graph.getOrderedPhases()
-    const beforeIdx = phases.indexOf('before:render')
-    const renderIdx = phases.indexOf('render')
-    expect(beforeIdx).toBeLessThan(renderIdx)
-  })
-
-  it('resolves constraint phase for after constraint', () => {
-    const graph = new PhaseGraph()
-    const phase = graph.resolveConstraintPhase(undefined, 'render')
-
-    expect(phase).toBe('after:render')
-    expect(graph.hasPhase('after:render')).toBe(true)
-    // Should be inserted after render
-    const phases = graph.getOrderedPhases()
-    const afterIdx = phases.indexOf('after:render')
-    const renderIdx = phases.indexOf('render')
-    expect(afterIdx).toBeGreaterThan(renderIdx)
-  })
-
-  it('returns update phase when no constraints', () => {
-    const graph = new PhaseGraph()
-    const phase = graph.resolveConstraintPhase(undefined, undefined)
-
-    expect(phase).toBe('update')
-  })
-
-  it('caches ordered phases and invalidates on change', () => {
-    const graph = new PhaseGraph()
-    const phases1 = graph.getOrderedPhases()
-    const phases2 = graph.getOrderedPhases()
-
-    // Should be same reference (cached)
-    expect(phases1).toBe(phases2)
-
-    graph.addPhase('newPhase', { before: 'finish' })
-    const phases3 = graph.getOrderedPhases()
-
-    // Should be different reference after change
-    expect(phases3).not.toBe(phases1)
-    expect(phases3).toContain('newPhase')
-  })
-})
-
-//* Sorter Tests ==============================
-
-describe('rebuildSortedJobs', () => {
-  const createJob = (overrides: Partial<Job>): Job => ({
-    id: 'test-job',
-    callback: vi.fn(),
-    phase: 'update',
-    before: new Set(),
-    after: new Set(),
-    priority: 0,
-    index: 0,
-    drop: true,
-    enabled: true,
-    ...overrides,
-  })
-
-  it('sorts jobs by phase order', () => {
-    const graph = new PhaseGraph()
-    const jobs = new Map<string, Job>([
-      ['job-render', createJob({ id: 'job-render', phase: 'render', index: 0 })],
-      ['job-physics', createJob({ id: 'job-physics', phase: 'physics', index: 1 })],
-      ['job-update', createJob({ id: 'job-update', phase: 'update', index: 2 })],
-    ])
-
-    const sorted = rebuildSortedJobs(jobs, graph)
-
-    expect(sorted.map((j) => j.id)).toEqual(['job-physics', 'job-update', 'job-render'])
-  })
-
-  it('sorts jobs by priority within phase (higher first)', () => {
-    const graph = new PhaseGraph()
-    const jobs = new Map<string, Job>([
-      ['job-low', createJob({ id: 'job-low', phase: 'update', priority: 1, index: 0 })],
-      ['job-high', createJob({ id: 'job-high', phase: 'update', priority: 10, index: 1 })],
-      ['job-mid', createJob({ id: 'job-mid', phase: 'update', priority: 5, index: 2 })],
-    ])
-
-    const sorted = rebuildSortedJobs(jobs, graph)
-
-    expect(sorted.map((j) => j.id)).toEqual(['job-high', 'job-mid', 'job-low'])
-  })
-
-  it('uses index for tie-breaking when priorities equal', () => {
-    const graph = new PhaseGraph()
-    const jobs = new Map<string, Job>([
-      ['job-c', createJob({ id: 'job-c', phase: 'update', priority: 5, index: 2 })],
-      ['job-a', createJob({ id: 'job-a', phase: 'update', priority: 5, index: 0 })],
-      ['job-b', createJob({ id: 'job-b', phase: 'update', priority: 5, index: 1 })],
-    ])
-
-    const sorted = rebuildSortedJobs(jobs, graph)
-
-    expect(sorted.map((j) => j.id)).toEqual(['job-a', 'job-b', 'job-c'])
-  })
-
-  it('excludes disabled jobs', () => {
-    const graph = new PhaseGraph()
-    const jobs = new Map<string, Job>([
-      ['job-enabled', createJob({ id: 'job-enabled', enabled: true, index: 0 })],
-      ['job-disabled', createJob({ id: 'job-disabled', enabled: false, index: 1 })],
-    ])
-
-    const sorted = rebuildSortedJobs(jobs, graph)
-
-    expect(sorted.map((j) => j.id)).toEqual(['job-enabled'])
-  })
-
-  it('handles cross-job constraints with topological sort', () => {
-    const graph = new PhaseGraph()
-    const jobs = new Map<string, Job>([
-      ['job-a', createJob({ id: 'job-a', phase: 'update', after: new Set(['job-b']), index: 0 })],
-      ['job-b', createJob({ id: 'job-b', phase: 'update', index: 1 })],
-    ])
-
-    const sorted = rebuildSortedJobs(jobs, graph)
-
-    // job-b should come before job-a due to constraint
-    const idxA = sorted.findIndex((j) => j.id === 'job-a')
-    const idxB = sorted.findIndex((j) => j.id === 'job-b')
-    expect(idxB).toBeLessThan(idxA)
-  })
-})
-
-//* Rate Limiter Tests ==============================
-
-describe('shouldRun (rate limiter)', () => {
-  const createJob = (overrides: Partial<Job>): Job => ({
-    id: 'test-job',
-    callback: vi.fn(),
-    phase: 'update',
-    before: new Set(),
-    after: new Set(),
-    priority: 0,
-    index: 0,
-    drop: true,
-    enabled: true,
-    ...overrides,
-  })
-
-  it('returns true when no FPS limit', () => {
-    const job = createJob({})
-    expect(shouldRun(job, 1000)).toBe(true)
-  })
-
-  it('returns false when disabled', () => {
-    const job = createJob({ enabled: false })
-    expect(shouldRun(job, 1000)).toBe(false)
-  })
-
-  it('returns false when not enough time has passed', () => {
-    const job = createJob({ fps: 30, lastRun: 1000 })
-    // 30 FPS = ~33.3ms interval, only 10ms passed
-    expect(shouldRun(job, 1010)).toBe(false)
-  })
-
-  it('returns true and updates lastRun when interval passed', () => {
-    const job = createJob({ fps: 30, lastRun: 1000 })
-    // 30 FPS = ~33.3ms interval, 50ms passed
-    const result = shouldRun(job, 1050)
-
-    expect(result).toBe(true)
-    expect(job.lastRun).toBeDefined()
-  })
-
-  it('uses drop semantics when drop=true', () => {
-    const job = createJob({ fps: 30, lastRun: 1000, drop: true })
-    const now = 1100 // 100ms passed (missed ~2 frames)
-
-    shouldRun(job, now)
-
-    // With drop=true, lastRun snaps to now
-    expect(job.lastRun).toBe(now)
-  })
-
-  it('uses catch-up semantics when drop=false', () => {
-    const job = createJob({ fps: 30, lastRun: 1000, drop: false })
-    const now = 1100 // 100ms passed (missed ~2 frames)
-
-    shouldRun(job, now)
-
-    // With drop=false, lastRun advances by interval steps
-    // Interval is ~33.3ms, so 3 steps = ~100ms
-    expect(job.lastRun).toBeGreaterThan(1000)
-    expect(job.lastRun).toBeLessThanOrEqual(now)
-  })
-})
-
-//* Scheduler Tests ==============================
-
-describe('Scheduler', () => {
-  let scheduler: Scheduler
-  let unregisterRoot: () => void
-
-  // Mock R3F state for testing
-  const mockState = {
-    scene: {},
-    camera: {},
-    internal: { scheduler: null },
-  } as any
-
-  beforeEach(() => {
-    // Reset singleton and get fresh scheduler
-    Scheduler.reset()
-    scheduler = Scheduler.get()
-    // Set to never mode so loop doesn't auto-start
-    scheduler.frameloop = 'never'
-    // Register a mock root so jobs have somewhere to live
-    unregisterRoot = scheduler.registerRoot('test-root', { getState: () => mockState })
-  })
-
-  afterEach(() => {
-    unregisterRoot()
-    Scheduler.reset()
-  })
-
-  it('registers and unregisters jobs', () => {
-    const cb = vi.fn()
-    const unsubscribe = scheduler.register(cb, { id: 'test-job', rootId: 'test-root' })
-
-    expect(scheduler.getJobCount()).toBe(1)
-    expect(scheduler.getJobIds()).toContain('test-job')
-
-    unsubscribe()
-
-    expect(scheduler.getJobCount()).toBe(0)
-  })
-
-  it('generates IDs when not provided', () => {
-    const cb = vi.fn()
-    scheduler.register(cb, { rootId: 'test-root' })
-
-    expect(scheduler.getJobCount()).toBe(1)
-    expect(scheduler.getJobIds()[0]).toMatch(/^job_\d+$/)
-  })
-
-  it('exposes addPhase API', () => {
-    scheduler.addPhase('custom', { before: 'render' })
-
-    expect(scheduler.hasPhase('custom')).toBe(true)
-    expect(scheduler.phases).toContain('custom')
-  })
-
-  it('starts and stops the loop', () => {
-    expect(scheduler.isRunning).toBe(false)
-
-    scheduler.start()
-    expect(scheduler.isRunning).toBe(true)
-
-    scheduler.stop()
-    expect(scheduler.isRunning).toBe(false)
-  })
-
-  it('updates job options', () => {
-    const cb = vi.fn()
-    scheduler.register(cb, { id: 'test-job', rootId: 'test-root', priority: 1 })
-
-    scheduler.updateJob('test-job', { priority: 10, enabled: false })
-
-    // Job should be updated (we can't directly access the job, but it should not throw)
-    expect(scheduler.getJobCount()).toBe(1)
-  })
-
-  it('handles duplicate IDs with warning', () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
-
-    scheduler.register(vi.fn(), { id: 'dupe', rootId: 'test-root' })
-    scheduler.register(vi.fn(), { id: 'dupe', rootId: 'test-root' })
-
-    expect(warnSpy).toHaveBeenCalledWith('[useFrame] Job with id "dupe" already exists, replacing')
-    expect(scheduler.getJobCount()).toBe(1)
-
-    warnSpy.mockRestore()
-  })
-
-  it('supports manual step() for all jobs', () => {
-    const calls: string[] = []
-
-    scheduler.register(() => calls.push('job1'), { id: 'job1', rootId: 'test-root' })
-    scheduler.register(() => calls.push('job2'), { id: 'job2', rootId: 'test-root' })
-
-    // No automatic loop started
-    expect(scheduler.isRunning).toBe(false)
-    expect(calls.length).toBe(0)
-
-    // Manual step
-    scheduler.step()
-    expect(calls).toEqual(['job1', 'job2'])
-
-    // Step again
-    scheduler.step()
-    expect(calls).toEqual(['job1', 'job2', 'job1', 'job2'])
-  })
-
-  it('supports stepJob() for a single job', () => {
-    const calls: string[] = []
-
-    scheduler.register(() => calls.push('job1'), { id: 'job1', rootId: 'test-root' })
-    scheduler.register(() => calls.push('job2'), { id: 'job2', rootId: 'test-root' })
-
-    // Step only job1
-    scheduler.stepJob('job1')
-    expect(calls).toEqual(['job1'])
-
-    // Step only job2
-    scheduler.stepJob('job2')
-    expect(calls).toEqual(['job1', 'job2'])
-  })
-
-  it('supports pauseJob() and resumeJob()', () => {
-    const calls: string[] = []
-
-    scheduler.register(() => calls.push('job1'), { id: 'job1', rootId: 'test-root' })
-
-    expect(scheduler.isJobPaused('job1')).toBe(false)
-
-    scheduler.pauseJob('job1')
-    expect(scheduler.isJobPaused('job1')).toBe(true)
-
-    // Paused job should not run on step
-    scheduler.step()
-    expect(calls.length).toBe(0)
-
-    scheduler.resumeJob('job1')
-    expect(scheduler.isJobPaused('job1')).toBe(false)
-
-    scheduler.step()
-    expect(calls).toEqual(['job1'])
-  })
-
-  it('supports frameloop getter/setter', () => {
-    // With a root registered, frameloop defaults to 'never' until set
-    scheduler.frameloop = 'never'
-    expect(scheduler.frameloop).toBe('never')
-    expect(scheduler.isRunning).toBe(false)
-
-    scheduler.frameloop = 'always'
-    expect(scheduler.frameloop).toBe('always')
-    expect(scheduler.isRunning).toBe(true)
-
-    scheduler.frameloop = 'demand'
-    expect(scheduler.frameloop).toBe('demand')
-    expect(scheduler.isRunning).toBe(false)
-  })
-
-  it('supports invalidate() for demand mode', async () => {
-    const calls: string[] = []
-
-    scheduler.frameloop = 'demand'
-    scheduler.register(() => calls.push('frame'), { id: 'job', rootId: 'test-root' })
-
-    expect(calls.length).toBe(0)
-    expect(scheduler.isRunning).toBe(false)
-
-    // Invalidate should start the loop
-    scheduler.invalidate()
-    expect(scheduler.isRunning).toBe(true)
-
-    // Wait for frame to execute
-    await new Promise((resolve) => setTimeout(resolve, 50))
-
-    expect(calls.length).toBeGreaterThan(0)
-    // Should have stopped after running the requested frame(s)
-    expect(scheduler.isRunning).toBe(false)
-  })
-})
+import { createRoot, useThree, extend, useFrame } from '../src/legacy'
 
 //* Integration Tests (with Canvas) ==============================
 
@@ -574,6 +157,71 @@ describe('useFrame hook', () => {
     expect(calls.length).toBe(callsBeforeUnmount)
   })
 
+  it('keeps job ids unique across React roots, so unmounting one never leaks its job', async () => {
+    // React.useId() is only unique within one renderer instance: react-dom, and every copy of
+    // fiber's reconciler, count from zero on their own. Jobs registered under those ids used to
+    // collide, and since @pmndrs/scheduler 0.3 tracks job ids globally, unsubscribing one of two
+    // colliding jobs could miss it and leave it running. A fresh copy of fiber stands in for the
+    // second renderer here.
+    const callsA: string[] = []
+    const callsB: string[] = []
+    let controlsA: any
+    let controlsB: any
+
+    vi.resetModules()
+    const bundleA = await import('../src/index')
+    vi.resetModules()
+    const bundleB = await import('../src/index')
+
+    const A = () => {
+      controlsA = bundleA.useFrame(() => callsA.push('a'))
+      return null
+    }
+    const B = () => {
+      controlsB = bundleB.useFrame(() => callsB.push('b'))
+      return null
+    }
+
+    const rootA = bundleA.createRoot(createCanvas())
+    const rootB = bundleB.createRoot(createCanvas())
+    try {
+      await act(async () => (await rootA.configure({ frameloop: 'never' })).render(<A />))
+      await act(async () => (await rootB.configure({ frameloop: 'never' })).render(<B />))
+
+      expect(controlsA.id).not.toBe(controlsB.id)
+
+      // Remove A's job, then drive every root: A must stay silent
+      await act(async () => rootA.render(null))
+      await act(async () => controlsB.stepAll())
+
+      expect(callsA).toHaveLength(0)
+      expect(callsB.length).toBeGreaterThan(0)
+    } finally {
+      await act(async () => rootA.unmount())
+      await act(async () => rootB.unmount())
+    }
+  })
+
+  it('passes the fixed-step overstep through to callbacks inside a Canvas', async () => {
+    const oversteps: unknown[] = []
+    let controls: any
+
+    const Component = () => {
+      controls = useFrame((state) => oversteps.push(state.overstep))
+      return null
+    }
+
+    await act(async () => (await root.configure({ frameloop: 'never' })).render(<Component />))
+    await act(async () => controls.stepAll())
+
+    expect(oversteps.length).toBeGreaterThan(0)
+    for (const overstep of oversteps) {
+      expect(typeof overstep).toBe('number')
+      expect(overstep).toBeGreaterThanOrEqual(0)
+      expect(overstep).toBeLessThan(1)
+    }
+  })
+
   it('provides scheduler via useThree', async () => {
     let scheduler: any
 
@@ -622,13 +270,16 @@ describe('useFrame hook', () => {
       await new Promise((resolve) => setTimeout(resolve, 100))
     })
 
-    // Find first occurrence of each
+    // `physics` is a fixed-timestep phase (1/60), so it sits out frames until a whole step is
+    // banked. Check the first frame it runs in: physics substeps, then update, then render.
     const physicsIdx = order.indexOf('physics')
-    const updateIdx = order.indexOf('update')
-    const renderIdx = order.indexOf('render')
+    expect(physicsIdx).toBeGreaterThanOrEqual(0)
+    if (physicsIdx > 0) expect(order[physicsIdx - 1]).toBe('render')
 
-    // Phase order should be: physics -> update -> render
-    expect(physicsIdx).toBeLessThan(updateIdx)
+    const frame = order.slice(physicsIdx)
+    const updateIdx = frame.indexOf('update')
+    const renderIdx = frame.indexOf('render')
+    expect(frame.slice(0, updateIdx).every((phase) => phase === 'physics')).toBe(true)
     expect(updateIdx).toBeLessThan(renderIdx)
   })
 
@@ -1000,232 +651,184 @@ describe('useFrame hook', () => {
   })
 })
 
-//* Independent Mode Tests ==============================
+//* Outside Canvas: host-guaranteed ==============================
+// r3f's useFrame always delivers full RootState. Used outside a Canvas the job
+// registers on the scheduler's ambient root, but the callback is held until a
+// Canvas adopts the job (host state present).
 
-describe('Scheduler Independent Mode', () => {
+describe('useFrame outside Canvas', () => {
   beforeEach(() => {
     Scheduler.reset()
+    getScheduler().frameloop = 'never' // drive frames manually
   })
 
   afterEach(() => {
+    cleanup()
     Scheduler.reset()
   })
 
-  it('runs callbacks immediately without Canvas when independent=true', () => {
-    const scheduler = Scheduler.get()
-    scheduler.independent = true
-    scheduler.frameloop = 'never'
+  it('registers but does not fire until a host exists', () => {
+    const seen: any[] = []
+    function UI() {
+      useFrame((state) => seen.push(state.renderer))
+      return null
+    }
 
-    const calls: number[] = []
-
-    scheduler.register((state, delta) => {
-      calls.push(state.frame)
+    act(() => {
+      render(<UI />)
     })
 
-    // Should have a default root now
-    expect(scheduler.getRootCount()).toBe(1)
-
-    // Manual step should work
-    scheduler.step(1000)
-    expect(calls.length).toBe(1)
+    const scheduler = getScheduler()
+    // Job is registered immediately...
+    expect(scheduler.getJobCount()).toBe(1)
+    // ...but the callback is held — no host, so no full RootState yet
+    act(() => scheduler.step(1000))
+    expect(seen.length).toBe(0)
   })
 
-  it('provides timing-only state in independent mode', () => {
-    const scheduler = Scheduler.get()
-    scheduler.independent = true
-    scheduler.frameloop = 'never'
+  it('fires with full state once a Canvas adopts the job', () => {
+    const seen: any[] = []
+    function UI() {
+      useFrame((state) => seen.push(state.renderer))
+      return null
+    }
 
-    let receivedState: any
-
-    scheduler.register((state) => {
-      receivedState = state
+    act(() => {
+      render(<UI />)
     })
 
-    scheduler.step(1000)
+    const scheduler = getScheduler()
 
-    // Should have timing properties
-    expect(receivedState).toHaveProperty('time')
-    expect(receivedState).toHaveProperty('delta')
-    expect(receivedState).toHaveProperty('elapsed')
-    expect(receivedState).toHaveProperty('frame')
+    // No host yet — guarded
+    act(() => scheduler.step(1000))
+    expect(seen.length).toBe(0)
 
-    // Should NOT have RootState properties (no Canvas)
-    expect(receivedState.gl).toBeUndefined()
-    expect(receivedState.scene).toBeUndefined()
-    expect(receivedState.camera).toBeUndefined()
-  })
+    // A host (Canvas) registers and adopts the job
+    const fakeRenderer = { isFakeRenderer: true }
+    act(() => {
+      scheduler.registerRoot('host', { getState: () => ({ renderer: fakeRenderer }) })
+    })
 
-  it('creates default root automatically when independent mode is set', () => {
-    const scheduler = Scheduler.get()
-
-    expect(scheduler.getRootCount()).toBe(0)
-
-    scheduler.independent = true
-
-    expect(scheduler.getRootCount()).toBe(1)
+    // Now the callback runs, always with host state present
+    act(() => scheduler.step(2000))
+    expect(seen.length).toBe(1)
+    expect(seen[0]).toBe(fakeRenderer)
   })
 })
 
-//* Root Ready Tests ==============================
+//* System-job ordering: Bug #1 regression ==============================
+// The frustum/visibility system jobs register with { before: 'render' } (see
+// renderer.tsx). They must run after update but before render — previously they
+// used a bogus 'preRender' phase that the sorter appended after render/finish,
+// leaving state.frustum one frame stale for render-phase consumers.
 
-describe('Scheduler Root Ready', () => {
+describe('system job ordering', () => {
   beforeEach(() => {
     Scheduler.reset()
+    getScheduler().frameloop = 'never' // drive frames manually
   })
 
   afterEach(() => {
     Scheduler.reset()
   })
 
-  it('isReady returns false when no roots registered', () => {
-    const scheduler = Scheduler.get()
-    expect(scheduler.isReady).toBe(false)
-  })
+  it('runs { before: render } jobs after update and before render', () => {
+    const calls: string[] = []
+    const scheduler = getScheduler()
+    scheduler.registerRoot('test-root', { getState: () => ({}) })
 
-  it('isReady returns true after root is registered', () => {
-    const scheduler = Scheduler.get()
-
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
+    // Mirror renderer.tsx registration order/options for the system jobs
+    scheduler.register(() => calls.push('update'), { id: 'update-job', rootId: 'test-root', phase: 'update' })
+    scheduler.register(() => calls.push('render'), { id: 'render-job', rootId: 'test-root', phase: 'render' })
+    scheduler.register(() => calls.push('frustum'), { id: 'frustum', rootId: 'test-root', before: 'render' })
+    scheduler.register(() => calls.push('visibility'), {
+      id: 'visibility',
+      rootId: 'test-root',
+      before: 'render',
+      after: 'frustum',
     })
 
-    expect(scheduler.isReady).toBe(true)
-  })
+    scheduler.step(1000)
 
-  it('onRootReady fires immediately if already ready', () => {
-    const scheduler = Scheduler.get()
-
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
-    })
-
-    let ready = false
-    scheduler.onRootReady(() => {
-      ready = true
-    })
-
-    // Should fire immediately since root is already registered
-    expect(ready).toBe(true)
-  })
-
-  it('onRootReady fires when root registers', () => {
-    const scheduler = Scheduler.get()
-
-    let ready = false
-    scheduler.onRootReady(() => {
-      ready = true
-    })
-
-    expect(ready).toBe(false)
-
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
-    })
-
-    expect(ready).toBe(true)
-  })
-
-  it('onRootReady returns unsubscribe function', () => {
-    const scheduler = Scheduler.get()
-
-    let calls = 0
-    const unsubscribe = scheduler.onRootReady(() => {
-      calls++
-    })
-
-    // Unsubscribe before any root is registered
-    unsubscribe()
-
-    // Register root
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
-    })
-
-    // Should NOT have fired
-    expect(calls).toBe(0)
+    expect(calls).toEqual(['update', 'frustum', 'visibility', 'render'])
   })
 })
 
-//* Error Handling Tests ==============================
+//* Legacy numeric priority notices ==============================
 
-describe('Scheduler Error Handling', () => {
+describe('legacy numeric priority notices', () => {
+  // v9 ran lower numeric priorities first; v10 maps the number to { priority } and runs higher
+  // first. A negative number therefore runs in the reverse order from v9, which the hook flags
+  // once per session via notifyDepreciated (suppressed in tests unless opted in).
+  const original = process.env.R3F_SHOW_DEPRECATION_WARNINGS
+  let canvas: HTMLCanvasElement
+  let root: ReturnType<typeof createRoot>
+
   beforeEach(() => {
-    Scheduler.reset()
+    process.env.R3F_SHOW_DEPRECATION_WARNINGS = 'true'
+    canvas = createCanvas()
+    root = createRoot(canvas)
   })
 
-  afterEach(() => {
-    Scheduler.reset()
+  afterEach(async () => {
+    await act(async () => root.unmount())
+    if (original === undefined) delete process.env.R3F_SHOW_DEPRECATION_WARNINGS
+    else process.env.R3F_SHOW_DEPRECATION_WARNINGS = original
   })
 
-  it('uses pluggable error handler from registerRoot', () => {
-    const scheduler = Scheduler.get()
-    scheduler.frameloop = 'never'
+  const isReversalNotice = (msg: unknown) => typeof msg === 'string' && /ordering direction is reversed/.test(msg)
 
-    const errors: Error[] = []
-    const errorHandler = (err: Error) => errors.push(err)
+  // Runs before the warning test: the notice is deduped per session, so silence can only be
+  // asserted before it has ever fired.
+  it('stays silent for a bare 0 and for an explicit { priority }', async () => {
+    const Zero = () => {
+      useFrame(() => {}, 0)
+      return null
+    }
+    const Explicit = () => {
+      useFrame(() => {}, { priority: -1 })
+      return null
+    }
 
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
-      onError: errorHandler,
-    })
-
-    // Register a job that throws
-    scheduler.register(
-      () => {
-        throw new Error('Test error')
-      },
-      { rootId: 'test-root' },
-    )
-
-    // Suppress console.error for this test
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    scheduler.step(1000)
-
-    errorSpy.mockRestore()
-
-    // Error should have been captured by our handler
-    expect(errors.length).toBe(1)
-    expect(errors[0].message).toBe('Test error')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await act(async () =>
+        (await root.configure({ frameloop: 'never' })).render(
+          <>
+            <Zero />
+            <Explicit />
+          </>,
+        ),
+      )
+      expect(warn.mock.calls.filter(([msg]) => isReversalNotice(msg))).toHaveLength(0)
+    } finally {
+      warn.mockRestore()
+    }
   })
 
-  it('falls back to console.error when no error handler provided', () => {
-    const scheduler = Scheduler.get()
-    scheduler.frameloop = 'never'
+  it('warns once when negative numeric priorities are used for ordering', async () => {
+    const First = () => {
+      useFrame(() => {}, -2)
+      return null
+    }
+    const Second = () => {
+      useFrame(() => {}, -1)
+      return null
+    }
 
-    scheduler.registerRoot('test-root', {
-      getState: () => ({}),
-      // No onError provided
-    })
-
-    scheduler.register(
-      () => {
-        throw new Error('Test error')
-      },
-      { rootId: 'test-root' },
-    )
-
-    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
-
-    scheduler.step(1000)
-
-    // Should have logged to console.error
-    expect(errorSpy).toHaveBeenCalled()
-
-    errorSpy.mockRestore()
-  })
-
-  it('triggerError calls the bound error handler', () => {
-    const scheduler = Scheduler.get()
-
-    const errors: Error[] = []
-    scheduler.registerRoot('test-root', {
-      onError: (err) => errors.push(err),
-    })
-
-    scheduler.triggerError(new Error('Manual error'))
-
-    expect(errors.length).toBe(1)
-    expect(errors[0].message).toBe('Manual error')
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await act(async () =>
+        (await root.configure({ frameloop: 'never' })).render(
+          <>
+            <First />
+            <Second />
+          </>,
+        ),
+      )
+      expect(warn.mock.calls.filter(([msg]) => isReversalNotice(msg))).toHaveLength(1)
+    } finally {
+      warn.mockRestore()
+    }
   })
 })

@@ -72,4 +72,5 @@ runs:
             -f sha="$TAG_SHA"
         fi
         echo "Pushed git tag ${TAG} -> ${HEAD_SHA}"
+
 # !WITH_GENESYS

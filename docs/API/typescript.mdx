@@ -1,7 +1,7 @@
 ---
 title: TypeScript
 description: Common scenarios and how to approach them with TypeScript
-nav: 9
+nav: 10
 ---
 
 ## Typing with `useRef`
@@ -116,20 +116,54 @@ const Element = extend(CustomElement)
 <Element />
 ```
 
-## Extending three default elements
+## Three's own elements
 
-If you open your own root instead of using `<Canvas>`, you can extend the default elements with `extend`. But keep in mind that the `* as THREE` namespace contains classes, functions, numbers, strings. At the moment we suggest you use `any` or `@ts-ignore` unless you extract the exact classes you need (`extend({ Mesh, Group, ... })`).
+Every three class is a JSX element without any `extend()` call, on `<Canvas>` and on a root you open with `createRoot` alike. A root resolves element names against the namespace of the renderer it loaded, so a WebGPU root has `<meshStandardNodeMaterial>` and a WebGL root does not. The element map follows the entry you import from: `@react-three/fiber` types both namespaces, `/legacy` only `three`, `/webgpu` only `three/webgpu`.
+
+`extend` is for classes three does not ship, and a registration always wins over the namespace, so `extend({ Mesh: MyMesh })` replaces `<mesh>` on every root.
+
+## Typing the renderer
+
+Each entry's hooks are typed for the renderer it renders with, so there is nothing to declare:
+
+| Import from                    | `useThree` / `useFrame` / `onCreated` state | `useRenderTarget()` | JSX elements                 |
+| ------------------------------ | ------------------------------------------- | ------------------- | ---------------------------- |
+| `@react-three/fiber`           | `WebGPURootState` (`WebGPURenderer`)        | `RenderTarget`      | `three/webgpu`               |
+| `@react-three/fiber/legacy`    | `LegacyRootState` (`WebGLRenderer`)         | `WebGLRenderTarget` | `three`                      |
+| `@react-three/fiber/extension` | `RootState` (either renderer)               | —                   | —                            |
 
 ```tsx
-import * as THREE from 'three'
-import { extend, createRoot, events } from '@react-three/fiber'
+import { useFrame, useRenderTarget, useThree } from '@react-three/fiber'
 
-// Register the THREE namespace as native JSX elements.
-extend(THREE as any)
-
-// Create a react root
-const root = createRoot(document.querySelector('canvas'))
+const renderer = useThree((s) => s.renderer) // WebGPURenderer
+useFrame(({ renderer }) => renderer.compute(kernel))
+const fbo = useRenderTarget() // RenderTarget
 ```
+
+`RootState` is the base type every entry shares, with `renderer` typed as either renderer. The narrowed states extend it, so a function annotated with it (`useFrame((state: RootState) => ...)`) still compiles, and fields a package adds to it (`declare module '@react-three/fiber' { interface RootState { ... } }`) appear on the narrowed states too. The deprecated `state.gl` keeps the base type; use `state.renderer`.
+
+### Libraries
+
+A library that works under either renderer imports its hooks from `@react-three/fiber/extension`, whose types are the base `RootState`. Narrow where it needs one renderer's members:
+
+```tsx
+import { useThree } from '@react-three/fiber/extension'
+
+const renderer = useThree((s) => s.renderer)
+if ('isWebGPURenderer' in renderer) renderer.compute(kernel)
+```
+
+An app can narrow those base types too, for code that goes through them, by registering its renderer once:
+
+```tsx
+declare module '@react-three/fiber' {
+  interface Register {
+    renderer: 'webgpu' // or 'webgl'
+  }
+}
+```
+
+Registering only changes types. What a Canvas renders with is decided by the import: WebGPU on `@react-three/fiber`, WebGL on `/legacy`. (`/webgpu` is the deprecated name for the WebGPU entry and is removed in the first beta.)
 
 ## Exported types
 
@@ -143,8 +177,11 @@ Intersection
 Subscription
 RenderCallback
 
-// `useThree`'s returned internal state
+// The base root state every entry shares; `useThree` on @react-three/fiber returns WebGPURootState
 RootState
+WebGPURootState
+// Register a renderer to narrow the base RootState (see above)
+Register
 Performance
 Dpr
 Size

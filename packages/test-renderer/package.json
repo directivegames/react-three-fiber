@@ -1,29 +1,34 @@
 {
   "name": "@react-three/test-renderer",
-  "version": "10.0.0-alpha.2",
+  "version": "10.0.0-alpha.6",
   "description": "Test Renderer for react-three-fiber",
   "author": "Josh Ellis",
   "license": "MIT",
-  "main": "dist/react-three-test-renderer.cjs.js",
-  "module": "dist/react-three-test-renderer.esm.js",
-  "types": "dist/react-three-test-renderer.cjs.d.ts",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
   "sideEffects": false,
+  "scripts": {
+    "build": "unbuild",
+    "stub": "unbuild --stub"
+  },
   "exports": {
     ".": {
-      "types": "./src/index.tsx",
-      "import": "./dist/react-three-test-renderer.esm.js",
-      "require": "./dist/react-three-test-renderer.cjs.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.cjs"
     },
     "./legacy": {
-      "types": "./src/legacy.tsx",
-      "import": "./dist/legacy.esm.js",
-      "require": "./dist/legacy.cjs.js"
+      "types": "./dist/legacy.d.ts",
+      "import": "./dist/legacy.mjs",
+      "require": "./dist/legacy.cjs"
     },
     "./webgpu": {
-      "types": "./src/webgpu/index.tsx",
-      "import": "./dist/webgpu.esm.js",
-      "require": "./dist/webgpu.cjs.js"
-    }
+      "types": "./dist/webgpu/index.d.ts",
+      "import": "./dist/webgpu/index.mjs",
+      "require": "./dist/webgpu/index.cjs"
+    },
+    "./package.json": "./package.json"
   },
   "bugs": {
     "url": "https://github.com/pmndrs/react-three-fiber/issues"
@@ -33,17 +38,10 @@
     "type": "git",
     "url": "git+https://github.com/pmndrs/react-three-fiber.git"
   },
-  "preconstruct": {
-    "entrypoints": [
-      "index.tsx",
-      "legacy.tsx",
-      "webgpu/index.tsx"
-    ]
-  },
   "peerDependencies": {
     "@react-three/fiber": ">=10.0.0-alpha.0",
-    "react": "^19.0.0",
-    "three": ">=0.181"
+    "react": ">=19.0 <19.4",
+    "three": ">=0.185.0"
   },
   "peerDependenciesMeta": {
     "three": {
@@ -52,6 +50,12 @@
   },
   "devDependencies": {
     "@react-three/fiber": "workspace:@gnsx/react-three-fiber@*",
-    "three": ">=0.181"
-  }
+    "@react-three/tsl": "workspace:*",
+    "@webgpu/types": "^0.1.64",
+    "three": ">=0.185.0"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }

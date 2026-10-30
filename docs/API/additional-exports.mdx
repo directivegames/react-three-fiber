@@ -1,15 +1,14 @@
 ---
 title: Additional Exports
-nav: 8
+nav: 9
 ---
 
 | export               | usage                                                          |
 | -------------------- | -------------------------------------------------------------- |
-| `addEffect`          | Adds a global render callback which is called each frame       |
-| `addAfterEffect`     | Adds a global after-render callback which is called each frame |
-| `addTail`            | Adds a global callback which is called when rendering stops    |
+| `addEffect`          | Deprecated: use `useFrame(callback, { phase: 'start' })`       |
+| `addAfterEffect`     | Deprecated: use `useFrame(callback, { phase: 'finish' })`      |
+| `addTail`            | Deprecated: use `getScheduler().onIdle(callback)`              |
 | `buildGraph`         | Collects nodes and materials from a THREE.Object3D             |
-| `flushGlobalEffects` | Flushes global render-effects for when manually driving a loop |
 | `flushSync`          | Force React to flush any updates synchronously and immediately |
 | `invalidate`         | Forces view global invalidation                                |
 | `advance`            | Advances the frameloop (given that it's set to 'never')        |
@@ -18,6 +17,140 @@ nav: 8
 | `createRoot`         | Creates a root that can render three JSX into a canvas         |
 | `events`             | Dom pointer-event system                                       |
 | `applyProps`         | `applyProps(element, props)` sets element properties,          |
-| `act`                | usage with react-testing                                       |
 | `useInstanceHandle`  | Exposes react-internal local state from `instance.__r3f`       |
-|                      |                                                                |
+| `fromRef`            | Defers a prop until a ref is populated (e.g. `target`)          |
+| `once`               | Marks a method prop to run only on mount                        |
+| `updateFrustum`      | Recomputes the camera frustum — `updateFrustum(camera, frustum?)` (see [Visibility & Frustum](/scene/visibility)) |
+| `Environment`        | Scene background / image-based lighting component (see [Canvas Background](/api/canvas#canvas-background)) |
+| `Portal`             | Re-parents children into another container (see [Camera Parenting](/scene/camera-parenting)) |
+| `registerRootExtension` | Attaches per-root setup, dispose and HMR handling (for library authors, see [below](#extending-the-root)) |
+| `setRenderOverride`  | Replaces the default render call for a root (for library authors, see [below](#extending-the-root)) |
+| `getThree`           | Three's shared core (`Vector3`, `Scene`, constants, ...) once a root has loaded its renderer; throws before that (see [below](#reaching-three-from-the-shared-core)) |
+| `hasThree`           | Whether any root has loaded three yet                           |
+| `whenThree`          | Promise resolving with three's shared core once a root has loaded it |
+| `isLayers`           | Type guard for `THREE.Layers`, checked structurally (no `instanceof`) |
+| `isUniform`          | Type guard for `THREE.Uniform`, checked structurally (no `instanceof`) |
+
+## Prop Utilities
+
+v10 adds two utilities for common prop patterns that previously required imperative code.
+
+### `fromRef` — deferred ref resolution
+
+`fromRef` defers prop application until a ref is populated. This is essential for props like `target` that reference sibling elements, replacing the old mount-time `useEffect`:
+
+```tsx
+import { fromRef } from '@react-three/fiber'
+
+function SpotlightWithTarget() {
+  const targetRef = useRef<THREE.Object3D>(null)
+  return (
+    <>
+      <group ref={targetRef} position={[0, 0, -10]} />
+      {/* target resolves after targetRef is populated */}
+      <spotLight target={fromRef(targetRef)} intensity={100} />
+    </>
+  )
+}
+```
+
+When the prop needs the sibling _wrapped_ rather than assigned as-is, pass a transform as the second argument. It runs once the ref is populated and its result is what gets assigned:
+
+```tsx
+import { lights } from 'three/tsl'
+
+// A node material's lightsNode needs a LightsNode, not the light itself
+<meshPhongNodeMaterial lightsNode={fromRef(lightRef, (light) => lights([light]))} />
+```
+
+Only top-level props on a three element are resolved. A marker nested inside another value (an array, an options object) or passed to a React component is not seen.
+
+### `once` — mount-only method calls
+
+`once` marks a method prop to be applied only on initial mount, which is useful for geometry transforms that shouldn't compound every render:
+
+```tsx
+import { once } from '@react-three/fiber'
+
+// Rotate geometry 90° on mount (without `once` this compounds every render)
+<boxGeometry args={[1, 1, 1]} rotateX={once(Math.PI / 2)} />
+
+// Center geometry on mount
+<bufferGeometry center={once()} />
+
+// Apply a matrix on mount
+<bufferGeometry applyMatrix4={once(transformMatrix)} />
+
+// Multi-argument methods take the arguments directly
+<planeGeometry args={[10, 10]} translate={once(0, 0, 5)} />
+```
+
+`once` is typed as the value the prop declares: a single argument is the argument itself, several arguments are the tuple, and a bare `once()` is `true`. Pass the arguments individually, not as an array: `once([0, 0, 5])` calls `translate([0, 0, 5])`.
+
+When `args` change (triggering element reconstruction), `once` methods run again on the new instance.
+
+## Reaching three from the shared core
+
+Every entry shares one core that never imports `three` itself; the first `<Canvas>` (or `createRoot`) to configure its renderer registers three's namespace. `getThree()` returns the classes and constants `three` and `three/webgpu` have in common. It is available before any element renders, any hook runs or `onCreated` fires, and throws if no root has loaded a renderer yet. Use `hasThree()` to check, or `await whenThree()` to wait.
+
+```tsx
+import { getThree, whenThree } from '@react-three/fiber'
+
+// Inside a component or frame callback, three is already loaded
+const v = new (getThree().Vector3)(0, 1, 0)
+
+// Module-level code that may run before any Canvas
+const { Scene } = await whenThree()
+```
+
+Most apps should keep importing classes from `three` directly; these are for libraries that want to avoid a static `three` import. Renderer-specific classes (`WebGLRenderer`, node materials, ...) are not on it. For the same reason, `isLayers` and `isUniform` test for a `THREE.Layers` or `THREE.Uniform` by shape rather than `instanceof`.
+
+## Extending the root
+
+These are for packages that build on R3F, such as `@react-three/tsl`. App code rarely needs them.
+
+### `registerRootExtension`
+
+Registers per-root setup, cleanup and hot-reload handling without R3F knowing about your package.
+
+```tsx
+import { registerRootExtension } from '@react-three/fiber/extension'
+
+registerRootExtension({
+  name: 'my-library',
+  // Once per root, after its renderer exists and before onCreated and the first frame.
+  // Return fields to merge into the root's state, or nothing to skip this root.
+  setup(store) {
+    if (store.getState().isLegacy) return
+    return { /* per-root state */ }
+  },
+  // When a root this extension set up unmounts.
+  dispose(store) {},
+  // When <Canvas> detects hot module replacement (skipped with hmr={false}).
+  hmr(store) {},
+})
+```
+
+- Roots that already exist when you register are set up immediately; later roots as they are created.
+- Registering the same `name` again replaces the entry, which keeps hot reloads safe: roots it already set up are not set up twice, and the new entry's `dispose` and `hmr` take over.
+- The function returned by `registerRootExtension` unregisters it. Roots it already set up keep their state and still get `dispose` when they unmount.
+
+### `setRenderOverride`
+
+Points a root's default render job at your own render function, for example a post-processing pipeline. Pass `null` to go back to `renderer.render(scene, camera)`.
+
+```tsx
+import { setRenderOverride, useStore } from '@react-three/fiber/extension'
+
+const store = useStore()
+setRenderOverride(store, () => composer.render())
+```
+
+Unlike taking over the `render` phase with `useFrame`, the default job keeps its behaviour: the Canvas `fps` throttle, error reporting to the error boundary, and backing off when a user registers a `{ phase: 'render' }` job. `useRenderPipeline` renders through this.
+
+### The `@react-three/fiber/extension` entry
+
+Every entry shares one core, and nothing in that core imports three: a library can import hooks from `@react-three/fiber` and add no renderer and no second copy of fiber to an app on any entry.
+
+`@react-three/fiber/extension` is the smallest stable surface for a package that builds on fiber: `useStore`, `useThree`, `useFrame`, `context`, `registerRootExtension`, `setRenderOverride`, `getTextureView` and the shared types, and nothing that could ever grow a renderer. `getTextureView(store)` is the texture registry as a hook should read it during render: registered textures plus those a `useTexture` earlier in the same render loaded but has not registered yet (registration waits for a layout effect). It works under a `<Canvas>` from any entry. Apps should keep importing from `@react-three/fiber`, `/webgpu` or `/legacy`.
+

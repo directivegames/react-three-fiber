@@ -348,6 +348,21 @@ describe('diffProps', () => {
     expect((filtered.scale as THREE.Vector3).toArray()).toStrictEqual([1, 1, 1])
   })
 
+  it('resets a removed prop to the class default when the constructor takes arguments', () => {
+    // Every material, geometry and camera constructor takes a parameters object. The reset used
+    // to be gated on a zero-length constructor and wrote a literal 0 for everything else, which
+    // turned a removed `color` black and a removed `map` into a broken texture slot.
+    const material = new THREE.MeshBasicMaterial({ color: 'red', transparent: true, map: new THREE.Texture() })
+    const instance = prepare(material, store, '', { color: 'red', transparent: true, map: material.map })
+    const filtered = diffProps(instance, {})
+
+    const defaults = new THREE.MeshBasicMaterial()
+    expect((filtered.color as THREE.Color).getHexString()).toBe(defaults.color.getHexString())
+    expect(filtered.transparent).toBe(false)
+    expect(filtered.map).toBeNull()
+    expect(Object.values(filtered)).not.toContain(0)
+  })
+
   it('should filter reserved props without accessing them', () => {
     const get = vi.fn()
     const set = vi.fn()
@@ -409,6 +424,44 @@ describe('applyProps', () => {
 
     expect(target.foo).not.toBe(foo)
     expect(target.foo.value).toBe(false)
+  })
+
+  it('should merge shader material uniforms into a stable target', () => {
+    const material = new THREE.ShaderMaterial({ uniforms: { time: { value: 1 } } })
+    const uniforms = material.uniforms
+    const time = material.uniforms.time
+
+    const nextUniforms = {
+      time: { value: 2 },
+      resolution: { value: new THREE.Vector2(4, 8) },
+    }
+
+    applyProps(material, { uniforms: nextUniforms })
+
+    // The uniforms object is copied in leaving a stable ref
+    expect(material.uniforms).toBe(uniforms)
+    expect(material.uniforms).not.toBe(nextUniforms)
+    // Individual uniforms are also copied into if present
+    expect(material.uniforms.time).toBe(time)
+    expect(material.uniforms.time).not.toBe(nextUniforms.time)
+    expect(material.uniforms.time.value).toBe(2)
+    // When it is a new uniform it gets cloned instead of assigning by ref
+    expect(material.uniforms.resolution).not.toBe(nextUniforms.resolution)
+    expect(material.uniforms.resolution.value.toArray()).toStrictEqual([4, 8])
+  })
+
+  it('should merge pierced uniform props into stable shader uniforms', () => {
+    const material = new THREE.ShaderMaterial({
+      uniforms: { uColor: { value: new THREE.Color('hotpink') } },
+    })
+    const uniforms = material.uniforms
+    const uColor = material.uniforms.uColor
+
+    applyProps(material, { 'uniforms-uColor-value': 'royalblue' })
+
+    expect(material.uniforms).toBe(uniforms)
+    expect(material.uniforms.uColor).toBe(uColor)
+    expect((material.uniforms.uColor.value as THREE.Color).getHex()).toBe(new THREE.Color('royalblue').getHex())
   })
 
   it('should prefer to copy potentially read-only math classes', () => {

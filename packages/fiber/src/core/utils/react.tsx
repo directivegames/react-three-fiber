@@ -1,23 +1,11 @@
 import * as React from 'react'
-import { act as reactAct } from 'react'
-import { useFiber, traverseFiber, useContextBridge } from 'its-fine'
-import type { Bridge, UnblockProps } from '#types'
+import { useFiber, traverseFiber, useContextBridge, useActivityBridge as useFineActivityBridge } from 'its-fine'
+// Direct type-file imports, not the #types barrel: the barrel side-effect-imports the JSX element
+// augmentation (types/three.d.ts), which must not leak into the three-free extension entry.
+import type { Bridge, UnblockProps } from '../../../types/utils'
 
 //* React Utilities ==============================
 // React-specific hooks, components, and utilities for R3F
-
-/**
- * Safely flush async effects when testing, simulating a legacy root.
- * @deprecated Import from React instead. import { act } from 'react'
- */
-// Reference with computed key to break Webpack static analysis
-// https://github.com/webpack/webpack/issues/14814
-
-// export const act: typeof React.act = React[('act' + '') as 'act']
-// WITH_GENESYS
-// Named import: webpack cannot resolve `act` from `import * as React` (see webpack#14814).
-export const act = reactAct
-// !WITH_GENESYS
 
 /**
  * An SSR-friendly useLayoutEffect.
@@ -46,8 +34,11 @@ export function useMutableCallback<T>(fn: T): React.RefObject<T> {
   return ref
 }
 
+// Activity is optional in supported React 19.0/19.1 releases.
+const useActivityBridge = React[('Activity' + '') as keyof typeof React] ? useFineActivityBridge : () => React.Fragment
+
 /**
- * Bridges renderer Context and StrictMode from a primary renderer.
+ * Bridges renderer Context, StrictMode, and Activity visibility from a primary renderer.
  * Used to maintain React context when rendering into portals or secondary canvases.
  *
  * @returns A Bridge component that wraps children with the parent renderer's context
@@ -55,6 +46,7 @@ export function useMutableCallback<T>(fn: T): React.RefObject<T> {
 export function useBridge(): Bridge {
   const fiber = useFiber()
   const ContextBridge = useContextBridge()
+  const ActivityBridge = useActivityBridge()
 
   return React.useMemo(
     () =>
@@ -64,11 +56,13 @@ export function useBridge(): Bridge {
 
         return (
           <Root>
-            <ContextBridge>{children}</ContextBridge>
+            <ActivityBridge>
+              <ContextBridge>{children}</ContextBridge>
+            </ActivityBridge>
           </Root>
         )
       },
-    [fiber, ContextBridge],
+    [fiber, ContextBridge, ActivityBridge],
   )
 }
 
@@ -106,3 +100,30 @@ export const ErrorBoundary = /* @__PURE__ */ (() =>
       return this.state.error ? null : this.props.children
     }
   })()
+
+const noop = () => {}
+
+function Gate({ promise, onSettled }: { promise: PromiseLike<unknown>; onSettled: () => void }): null {
+  React.use(promise)
+  useIsomorphicLayoutEffect(onSettled, [onSettled])
+  return null
+}
+
+/** Waits for a promise in a null subtree, re-rendering the caller once it settles either way. */
+export function useGate(): [gate: React.ReactNode, waitFor: (promise: PromiseLike<unknown>) => void] {
+  const [promise, setPromise] = React.useState<PromiseLike<unknown> | null>(null)
+  const onSettled = React.useCallback(() => setPromise(null), [])
+  // Keep the first promise, or a repeated call would loop
+  const waitFor = React.useCallback(
+    (next: PromiseLike<unknown>) => setPromise((current) => current ?? Promise.resolve(next).then(noop, noop)),
+    [],
+  )
+
+  const gate = promise ? (
+    <React.Suspense fallback={null}>
+      <Gate promise={promise} onSettled={onSettled} />
+    </React.Suspense>
+  ) : null
+
+  return [gate, waitFor]
+}

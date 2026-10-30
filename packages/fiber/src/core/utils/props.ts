@@ -1,10 +1,27 @@
-import * as THREE from '#three'
+import type * as THREE from 'three'
+import { getThree } from '../three'
 import type { Instance, EventHandlers } from '#types'
-import { hasConstructor, is, isColorRepresentation, isCopyable, isTexture, isVectorLike } from './is'
+import {
+  hasConstructor,
+  is,
+  isColorRepresentation,
+  isCopyable,
+  isLayers,
+  isTexture,
+  isUniform,
+  isVectorLike,
+} from './is'
 import { findInitialRoot, invalidateInstance } from './instance'
-import { registerVisibility, unregisterVisibility, hasVisibilityHandlers } from '../visibility'
-import { isFromRef, FROM_REF } from './fromRef'
+import {
+  registerVisibility,
+  unregisterVisibility,
+  updateVisibilityHandlers,
+  hasVisibilityHandlers,
+} from '../visibility'
+import { isFromRef } from './fromRef'
 import { isOnce, ONCE } from './once'
+import { notifyDepreciated } from './notices'
+import { assertNodeMaterialSupported, warnGLSLMaterialUnsupported } from './nodeMaterial'
 
 //* Property Resolution & Application ==============================
 // Functions for resolving, diffing, attaching, and applying props to instances
@@ -21,7 +38,6 @@ export const RESERVED_PROPS = [
   'dispose',
   'attach',
   'object',
-  'onUpdate',
   // Behavior flags
   'dispose',
 ]
@@ -52,6 +68,50 @@ const MEMOIZED_PROTOTYPES = new Map()
  * https://github.com/mrdoob/three.js/pull/22748
  */
 const colorMaps = ['map', 'emissiveMap', 'sheenColorMap', 'specularColorMap', 'envMap']
+
+/**
+ * Material props three bakes into the compiled program (WebGL) or render object (WebGPU), so a change
+ * after the first render only shows once `material.needsUpdate` is set. Rule: list a prop only when
+ * three does NOT pick the change up on its own, since needsUpdate forces a program/render-object
+ * rebuild. Checked against three r185 on WebGLRenderer and WebGPURenderer (WebGPU + WebGL2 fallback).
+ *
+ * Intentionally excluded because three handles them itself: `wireframe` (draw mode is chosen per
+ * draw; listing it would force a WebGPU render-object rebuild), `toneMapped`, `clippingPlanes` /
+ * `clipIntersection`, `forceSinglePass`, uniform-backed props (color, opacity, ...) and numeric
+ * thresholds (alphaTest, clearcoat, sheen, transmission, ...) whose setters bump the version.
+ * Replacing `defines` is also left out: an inline object is a new reference on every render, and a
+ * pierced `defines-FOO` write resolves to the defines object, not the material.
+ * https://threejs.org/manual/#en/how-to-update-things
+ */
+const programProps = new Set([
+  'transparent',
+  'vertexColors',
+  'flatShading',
+  'fog',
+  // Culling is live, but DOUBLE_SIDED / FLIP_SIDED normal flipping is compiled in
+  'side',
+  'alphaHash',
+  'premultipliedAlpha',
+  // Both feed the OPAQUE define when the material is not transparent
+  'blending',
+  'alphaToCoverage',
+  'dithering',
+  'sizeAttenuation',
+  'combine',
+  'normalMapType',
+  'depthPacking',
+])
+
+/**
+ * Whether writing `next` over `previous` at `key` on `root` recompiles the material's shader: one of
+ * the program props changing value, or a texture slot (map, normalMap, envMap, ...) gaining or losing
+ * its texture. Swapping one texture for another keeps the program, so it does not count. The texture
+ * rule matters on every renderer: on WebGPU, clearing a texture without needsUpdate throws.
+ */
+function changesProgram(root: any, key: string, previous: unknown, next: unknown): boolean {
+  if (!root?.isMaterial || previous === next) return false
+  return programProps.has(key) || isTexture(previous) !== isTexture(next)
+}
 
 /**
  * Resolves a potentially pierced property key (e.g., 'material-color' → material.color).
@@ -122,6 +182,7 @@ export function attach(parent: Instance, child: Instance): void {
     const { root, key } = resolve(parent.object, child.props.attach)
     child.previousAttach = root[key]
     root[key] = child.object
+    if (changesProgram(root, key, child.previousAttach, child.object)) root.needsUpdate = true
   } else if (is.fun(child.props.attach)) {
     child.previousAttach = child.props.attach(parent.object, child.object)
   }
@@ -142,6 +203,7 @@ export function detach(parent: Instance, child: Instance): void {
     if (previous === undefined) delete root[key]
     // Otherwise set the previous value
     else root[key] = previous
+    if (changesProgram(root, key, child.object, previous)) root.needsUpdate = true
   } else {
     child.previousAttach?.(parent.object, child.object)
   }
@@ -203,17 +265,15 @@ export function diffProps<T = any>(instance: Instance<T>, newProps: Instance<T>[
     const { root, key } = resolve(instance.object, prop)
 
     // https://github.com/mrdoob/three.js/issues/21209
-    // HMR/fast-refresh relies on the ability to cancel out props, but threejs
-    // has no means to do this. Hence we curate a small collection of value-classes
-    // with their respective constructor/set arguments
-    // For removed props, try to set default values, if possible
-    if (root.constructor && root.constructor.length === 0) {
-      // create a blank slate of the instance and copy the particular parameter.
+    // HMR/fast-refresh relies on the ability to cancel out props, but threejs has no means to
+    // do this. So a removed prop is reset to whatever a freshly constructed instance of the
+    // same class carries. This is attempted for every class: gating it on a zero-length
+    // constructor excluded every material, geometry and camera (all take a parameters object)
+    // and wrote a literal `0` instead, which turned a removed `color` black and a removed `map`
+    // into a broken texture slot. When no default instance can be built, the prop is left alone.
+    if (typeof root?.constructor === 'function') {
       const ctor = getMemoizedPrototype(root)
-      if (!is.und(ctor)) changedProps[key] = ctor[key]
-    } else {
-      // instance does not have constructor, just set it to 0
-      changedProps[key] = 0
+      if (!is.und(ctor)) changedProps[prop] = ctor[key]
     }
   }
 
@@ -242,6 +302,24 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
     // Don't mutate reserved keys
     if (RESERVED_PROPS.includes(prop)) continue
 
+    // `onUpdate` was an R3F hook (called after every prop update) until v10 and is now an ordinary
+    // prop, assigned by name like any other. The notice fires wherever it is used, not only where
+    // the assignment is inert: on a Texture it becomes three's callback fired *after* a GPU upload,
+    // so the v9 idiom `onUpdate={(self) => (self.needsUpdate = true)}` no longer flags a changed
+    // `image` for upload, and on a TSL Node it replaces the `Node.onUpdate()` method. Both change
+    // behavior silently.
+    if (prop === 'onUpdate') {
+      notifyDepreciated({
+        heading: 'onUpdate is no longer an R3F prop',
+        body:
+          'v10 removed the onUpdate hook: R3F no longer calls it after prop updates. The value is assigned to the object by name. ' +
+          "On a Texture that sets three's Texture.onUpdate, which the renderer calls after a GPU upload, not after prop changes. " +
+          'On a node it replaces the Node.onUpdate() method. On other objects it is never called.\n\n' +
+          'Use an effect keyed on the props that change, read the object in useFrame, or use a ref callback.',
+        link: 'https://docs.pmnd.rs/react-three-fiber/migration/v10#onupdate-removed',
+      })
+    }
+
     // Deal with pointer events, including removing them if undefined
     if (instance && EVENT_REGEX.test(prop)) {
       if (typeof value === 'function') instance.handlers[prop as keyof EventHandlers] = value as any
@@ -262,11 +340,9 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
     // https://github.com/pmndrs/react-three-fiber/issues/274
     if (value === undefined) continue
 
-    // Handle deferred ref resolution - store for commitMount
-    if (isFromRef(value)) {
-      instance?.deferredRefs?.push({ prop, ref: value[FROM_REF] })
-      continue
-    }
+    // Deferred refs are resolved in commitMount, which re-scans instance.props for them once
+    // the target ref is populated. Skip here so the sentinel is never applied as a raw value.
+    if (isFromRef(value)) continue
 
     // Handle mount-only method calls
     if (isOnce(value)) {
@@ -292,6 +368,12 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
       continue
     }
 
+    // A hidden host keeps its intended visibility until Activity/Suspense reveals it.
+    if (prop === 'visible' && instance?.isHidden && instance.previousVisible !== undefined) {
+      instance.previousVisible = value as boolean
+      continue
+    }
+
     let { root, key, target } = resolve(object, prop)
 
     // Throw an error if we attempted to set a pierced prop to a non-object
@@ -308,7 +390,7 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
     }
 
     // Layers must be written to the mask property
-    if (target instanceof THREE.Layers && value instanceof THREE.Layers) {
+    if (isLayers(target) && isLayers(value)) {
       target.mask = value.mask
     }
 
@@ -333,12 +415,40 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
       // Otherwise just set single value
       else target.set(value)
     }
+    // ShaderMaterial uniforms must keep a stable target reference so that pierced updates
+    // (uniforms-foo-value) and references held by animation code keep working across renders.
+    else if ((root as THREE.ShaderMaterial).isShaderMaterial && key === 'uniforms' && is.obj(value)) {
+      if (!is.obj(root.uniforms)) root.uniforms = {}
+      const uniforms = root.uniforms as Record<string, THREE.Uniform>
+      const nextUniforms = value as Record<string, THREE.Uniform | { value: unknown }>
+
+      for (const name in nextUniforms) {
+        const uniform = nextUniforms[name]
+        const targetUniform = uniforms[name]
+
+        if (targetUniform) {
+          Object.assign(targetUniform, uniform)
+        } else {
+          const nextUniform = isUniform(uniform) ? uniform.clone() : new (getThree().Uniform)(uniform.value)
+          uniforms[name] = nextUniform
+        }
+      }
+    }
     // Else, just overwrite the value
     else {
+      if (key === 'material') {
+        assertNodeMaterialSupported(rootState, value)
+        warnGLSLMaterialUnsupported(rootState, value)
+      }
+      const previous = root[key]
       root[key] = value
 
       // Trigger shader recompilation when node props change on materials
       if (key.endsWith('Node') && (root as any).isMaterial) {
+        ;(root as any).needsUpdate = true
+      }
+      // ... and when a prop the program is compiled from changes (#3892)
+      else if (changesProgram(root, key, previous, value)) {
         ;(root as any).needsUpdate = true
       }
 
@@ -346,15 +456,16 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
       // Most 8-bit textures are authored in sRGB regardless of output display space
       // https://github.com/pmndrs/react-three-fiber/issues/344
       // https://github.com/mrdoob/three.js/pull/25857
+      const three = rootState && getThree()
       if (
-        rootState &&
-        rootState.renderer?.outputColorSpace === THREE.SRGBColorSpace &&
+        three &&
+        rootState.renderer?.outputColorSpace === three.SRGBColorSpace &&
         colorMaps.includes(key) &&
         isTexture(value) &&
         (root[key] as unknown as THREE.Texture | undefined)?.isTexture &&
         // sRGB textures must be RGBA8 since r137 https://github.com/mrdoob/three.js/pull/23129
-        root[key].format === THREE.RGBAFormat &&
-        root[key].type === THREE.UnsignedByteType
+        root[key].format === three.RGBAFormat &&
+        root[key].type === three.UnsignedByteType
       ) {
         root[key].colorSpace = rootState.textureColorSpace
       }
@@ -376,8 +487,21 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
     if (instance.eventCount && object.raycast !== null) {
       rootState.internal.interaction.push(object)
     }
+  }
 
-    // Register/update visibility handlers (onFramed, onOccluded, onVisible)
+  // Register/update visibility handlers (onFramed, onOccluded, onVisible)
+  //
+  // Deliberately NOT behind the `prevHandlers !== instance.eventCount` gate above. That gate
+  // compares a handler *count*, so swapping `onOccluded` for a different function leaves the
+  // count unchanged and the block never runs — and the registry keeps a snapshot of the OLD
+  // closure. Inline handlers (`onFramed={() => …}`) produce a new function every render, which
+  // is the common case, so the user's updated callback would simply never fire.
+  if (
+    instance?.parent &&
+    rootState?.internal &&
+    (instance.object as unknown as THREE.Object3D | undefined)?.isObject3D
+  ) {
+    const object = instance.object as unknown as THREE.Object3D
     const root = findInitialRoot(instance)
     const visibilityHandlers = {
       onFramed: instance.handlers.onFramed,
@@ -386,7 +510,12 @@ export function applyProps<T = any>(object: Instance<T>['object'], props: Instan
     }
 
     if (hasVisibilityHandlers(visibilityHandlers)) {
-      registerVisibility(root, object, visibilityHandlers)
+      // Update in place when already tracked, so the last-known visibility state survives.
+      // Re-registering would reset it and re-fire events that did not change (see
+      // updateVisibilityHandlers). Falls through to a fresh registration on first sight.
+      if (!updateVisibilityHandlers(root, object, visibilityHandlers)) {
+        registerVisibility(root, object, visibilityHandlers)
+      }
     } else {
       // Remove from visibility registry if no visibility handlers remain
       unregisterVisibility(root, object)

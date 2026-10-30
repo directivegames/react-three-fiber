@@ -1,14 +1,735 @@
 # Changelog (Alpha)
 
-This changelog tracks changes during the v10 alpha period. For the full changelog after stable release, see [CHANGELOG.md](./CHANGELOG.md).
+This changelog tracks changes during the v10 alpha period. For the full per-package history, see [`packages/fiber/CHANGELOG.md`](./packages/fiber/CHANGELOG.md). At stable release this file is folded into the release notes and retired.
 
 ---
 
-## Unreleased
+## 10.0.0-alpha.6
+
+Alpha 6 makes WebGPU the default. `<Canvas>` from `@react-three/fiber` renders with
+`WebGPURenderer`, which falls back to a WebGL2 backend where the browser has no WebGPU;
+`WebGLRenderer` moves to `@react-three/fiber/legacy`, and the import is the switch. Around that, the
+package splits and the frame loop is reworked: the TSL resource hooks move to `@react-three/tsl`
+with uniforms typed by name, multi-canvas is configured on the Canvas (`<Canvas primary>`,
+automatic sharing, `share`), `scheduler` is a Canvas prop on every entry, and `@pmndrs/scheduler`
+0.3 makes the `physics` phase a fixed timestep with interpolation. The core no longer imports
+three, so the renderer is a lazy chunk and libraries add none. The root and Canvas lifecycle was
+hardened (teardown at React's commit, renderer ownership and disposal, `<Activity>`, `root.ready`),
+and shader-shaping material props set `needsUpdate` for you. Start with the
+[migration guide](./docs/migration/v10.mdx): GLSL scenes and WebGL-only libraries need `/legacy`.
+Every breaking change since v9 is listed in [v10 Breaking Changes](./docs/migration/breaking-changes.mdx).
 
 ### Breaking Changes
 
+- `@react-three/fiber` renders with `WebGPURenderer` by default. It rendered with `WebGLRenderer`
+  unless a Canvas had the `renderer` prop; now every `<Canvas>` and `createRoot` on the default
+  import (and on `/webgpu`) uses WebGPU, and `WebGLRenderer` is only on `@react-three/fiber/legacy`.
+  There is no prop to switch back per Canvas: import `Canvas` / `createRoot` from `/legacy` for
+  GLSL `ShaderMaterial`s, `onBeforeCompile`, `postprocessing` and other libraries that need
+  `WebGLRenderer`. Hooks and libraries can keep importing from `@react-three/fiber`, since every
+  entry shares one core. `gl={...}` on a default-import Canvas throws, naming `/legacy` (WebGPU
+  settings go in `renderer`), and `<Canvas renderer>` is now the same as `<Canvas>`. A GLSL material
+  on a WebGPU canvas, which three draws with a blank default material, logs a one-time development
+  warning naming `/legacy`. The default import's renderer support is still a lazy chunk, and the
+  WebGL one is no longer reachable from it. `@react-three/test-renderer`'s default entry mocks and
+  creates WebGPU canvases to match ([#4013](https://github.com/pmndrs/react-three-fiber/pull/4013)).
+
+  ```diff
+  // GLSL shaders, postprocessing, drei shader materials
+  - import { Canvas } from '@react-three/fiber'
+  + import { Canvas } from '@react-three/fiber/legacy'
+  ```
+
+- `useThree`, `useFrame`, `useRenderTarget` and `Canvas`'s `onCreated` from `@react-three/fiber` are
+  typed for `WebGPURenderer` (`WebGPURootState`, `RenderTarget`), with nothing to register, and its
+  JSX map is the `three/webgpu` namespace. The hooks were typed for either renderer, so WebGPU-only
+  members needed a `Register` declaration or a cast. `RootState` stays the base type every entry
+  shares (either renderer), so augmentations of it keep working, and `WebGPURootState` stays
+  assignable to it: the deprecated `gl` keeps its base type. Code that read the default import's
+  state as WebGL belongs on `/legacy`; libraries that run on both renderers type against
+  `@react-three/fiber/extension`, which keeps the union and which `Register` still narrows
+  ([#4020](https://github.com/pmndrs/react-three-fiber/pull/4020)).
+- Multi-canvas is configured on the Canvas, not in the `renderer` bag. Mark the canvas that owns the
+  renderer `<Canvas primary>`; every other WebGPU canvas shares its renderer automatically, renders
+  after it by default, and ignores its own `renderer` settings (one development warning), since
+  renderer-wide settings belong to the owner. `share="id"` picks one of several primaries (which
+  need distinct ids), and `share={false}`, a renderer instance or factory, or the `gl` prop keep a
+  canvas on its own renderer. The primary announces itself synchronously on mount, so a canvas in
+  the same commit shares it whatever its place in the tree; a primary mounting after canvases that
+  already built their own renderer adopts none of them and warns once. With no `primary`, nothing
+  changes. `primary` is not available on `/legacy`.
+  No deprecation path: `renderer={{ primaryCanvas }}` (and a top-level `primaryCanvas`) throws,
+  pointing at `<Canvas primary>` / `share`. See [Multi-Canvas](./docs/webgpu/multi-canvas.mdx).
+
+  ```diff
+  - <Canvas id="main" renderer>
+  - <Canvas renderer={{ primaryCanvas: 'main', scheduler: { fps: 30 } }}>
+  + <Canvas id="main" primary>
+  + <Canvas scheduler={{ fps: 30 }}>
+  ```
+
+- `scheduler` is a Canvas prop (and a `configure()` option) on every entry, `/legacy` included:
+  `<Canvas scheduler={{ before, after, order, fps }}>`. `renderer={{ scheduler }}` throws, pointing
+  at `<Canvas scheduler>`.
+- `shadows` moved into the renderer settings: `renderer={{ shadows }}` (WebGPU) or `gl={{ shadows }}`
+  (WebGL, `/legacy`), same values. The top-level prop throws, naming the new place. It applies to a
+  renderer R3F builds; a renderer instance or factory keeps the `shadowMap` its creator set.
+- `@monogrid/gainmap-js` is no longer a dependency. `<Environment>` / `useEnvironment` drop the
+  split gain map format (`['sdr.webp', 'gainmap.webp', 'metadata.json']`), which only that package
+  reads. `.hdr`, `.exr`, six-face cube sets and single-file Ultra HDR `.jpg` (three's own
+  `UltraHDRLoader`, the Android / ISO 21496-1 standard) stay. Every decoder is now three's own and
+  decodes on the CPU, so `.jpg` environments can be preloaded like the others. Apps that need the
+  split format keep it through drei's `<Environment>`.
+- The TSL resource hooks moved to a new package, `@react-three/tsl`: `useUniforms`, `useUniform`,
+  `useNodes`, `useLocalNodes`, `useBuffers`, `useGPUStorage`, `useRenderPipeline` and the
+  `rebuildAll*` helpers. They are no longer exported from `@react-three/fiber/webgpu`, and
+  `@react-three/test-renderer/webgpu` no longer re-exports them. Install `@react-three/tsl` and
+  change the import. The API is the same except `useRenderPipeline`'s ownership (below). See the
+  [migration guide](./docs/migration/v10.mdx#tsl-hooks-moved-to-react-threetsl).
+- `state.uniforms`, `state.nodes`, `state.buffers`, `state.gpuStorage`, `state.renderPipeline` and
+  `state.passes` are added to `RootState` by `@react-three/tsl` (its root extension sets them up and
+  its types augment `RootState` on the default, `/webgpu` and `/extension` entries). They still read
+  the same in `useFrame`, `useThree` and handlers once the package is imported. Core no longer
+  creates them, and `/legacy` types no longer have them. `renderPipeline` and `passes` are optional:
+  they exist once `useRenderPipeline` creates a pipeline.
+- The deprecated standalone TSL utilities are removed: `removeUniforms(set, …)`, `clearScope`,
+  `clearRootUniforms`, `removeNodes(set, …)`, `clearNodeScope` and `clearRootNodes` (also from
+  `@react-three/test-renderer/webgpu`). Use the utilities `useUniforms()` and `useNodes()` return.
+- The `onUpdate` prop is removed ([#3903](https://github.com/pmndrs/react-three-fiber/issues/3903)).
+  It hooked into reconciler internals and fired on unrelated updates. Use an effect keyed on the
+  props that change, read the object in `useFrame`, or use a ref callback; see the
+  [migration guide](./docs/migration/v10.mdx#onupdate-removed). `onUpdate` is no longer reserved, so
+  it is assigned to the object by name: `<texture onUpdate={fn} />` now sets three's own
+  `Texture.onUpdate` (fired after a GPU upload, not after prop changes). R3F logs a one-time notice
+  the first time it sees an `onUpdate` prop.
+- `@pmndrs/scheduler` is now `^0.3.0`, which makes the built-in `physics` phase a fixed timestep
+  (1/60 by default). A `useFrame(cb, { phase: 'physics' })` job runs once per whole step banked
+  from the root's clock instead of once per frame: zero times on a frame that banks less than a
+  step, several on a slow one (at most 8, then surplus time is dropped), each time with
+  `delta === 1 / 60`. Step a simulation by the `delta` it is given
+  (`useFrame((_, dt) => world.step(dt), { phase: 'physics' })`). A job that should still run once
+  per frame belongs in another phase, or the phase can go back to per-frame with
+  `getScheduler().setPhaseTimestep('physics', undefined)`. See
+  [Frame Loop](./docs/frame-loop.mdx)
+  ([#4009](https://github.com/pmndrs/react-three-fiber/pull/4009)).
+- `useRenderPipeline` (`@react-three/tsl`): the component that configures the pipeline owns it.
+  Unmounting it frees its pipeline and scene pass, and the canvas renders without post-processing
+  again (before, the pipeline kept rendering until `reset()`, and `reset()` never disposed it). Pass
+  `{ persist: true }` as the third argument to keep it rendering after unmount, until another
+  component configures the pipeline, `reset()`, or canvas unmount. A call without callbacks only
+  reads and no longer creates a pipeline. With two mounted owners the most recently mounted renders,
+  the other takes over again when it unmounts, and a development warning names the overlap. Release
+  is deferred a task, so StrictMode's double mount and Fast Refresh remounts keep the pipeline and
+  scene pass: before, every StrictMode mount and every Fast Refresh ran the callbacks twice and built
+  a second scene pass. Callbacks re-run after every hot update (the TSL resource generation), on the
+  same scene pass, once the fresh uniforms are registered. `reset()`, `rebuild()` and `clearPasses()`
+  called from a reader act on the pipeline that is rendering, and each callback run registers its
+  passes from scratch instead of keeping keys from the last run. The callbacks get the same state as
+  `useNodes` creators (wrapped `uniforms`, `nodes`, ..., staged entries included) and their reads are
+  tracked as in `useLocalNodes`: a read resource that appears, is replaced or is removed re-runs them
+  on the same scene pass. Callbacks that read a uniform their parent registers from their state no
+  longer bake `null` into the graph
+  ([#4029](https://github.com/pmndrs/react-three-fiber/pull/4029)).
+
+### Deprecations
+
+- `@react-three/fiber/webgpu` and `@react-three/test-renderer/webgpu` are deprecated and will be
+  removed in the first v10 beta. With WebGPU the default, `/webgpu` is the same renderer as
+  `@react-three/fiber`, imported statically and typed against `WebGPURenderer`. Import from
+  `@react-three/fiber` (and `@react-three/test-renderer`) instead; its hooks are already typed for
+  WebGPU, with nothing to register. Both entries keep working
+  through the alphas; their exports are marked `@deprecated`, with no runtime notice
+  ([#4013](https://github.com/pmndrs/react-three-fiber/pull/4013)).
+
+### Features
+
+- React 19.3 is supported; the peer range is now `>=19.0 <19.4`. The vendored reconciler is built
+  from `react-reconciler` 0.34.0, its transition `types` guard is relaxed while vendoring so React
+  19.0–19.2 hosts keep working, and a `<ViewTransition>` subtree inside the canvas now commits
+  synchronously (three has nothing to animate) instead of leaving the reconciler stuck mid-commit
+  ([#3915](https://github.com/pmndrs/react-three-fiber/issues/3915),
+  [#3935](https://github.com/pmndrs/react-three-fiber/pull/3935)).
+- Nothing of three up front. `@react-three/fiber`'s core no longer imports `three` or
+  `three/webgpu`: each renderer lives in a support module, and the default import loads the WebGPU
+  one on demand, as a lazy chunk. All entries are built in one pass on a shared core, so a library
+  importing hooks from `@react-three/fiber` adds no renderer and no second copy of fiber to an app on
+  any entry, `/legacy` included. `/legacy` (WebGL) and `/webgpu` load their renderer statically and
+  narrow the types to it (no extra request, one renderer's types, `useRenderTarget` typed to its
+  target). JSX element names resolve
+  against explicit `extend()` registrations first, then the three namespace of the root's own
+  renderer, so a WebGL root no longer advertises node materials it cannot build; each entry
+  declares its own `ThreeElements` (`ThreeElementsOf<T>`) and `ReactThreeFiber` namespace. Core
+  code reaches three's shared core through `getThree()` / `whenThree()` / `hasThree()` and the
+  renderer-specific classes through `state.internal.support`. The environment decoders and
+  `GroundedSkybox` load on demand.
+  `pnpm verify-treeshake` (Vite and esbuild) replaces `verify-bundles`. Supersedes #3950-#3952:
+  the shared-core build, provider and per-root element resolution follow that stack; the
+  three-free core and lazy renderer supports are new. See
+  [BUILD.md](./docs/development/BUILD.md).
+- `Register` for the renderer: `declare module '@react-three/fiber' { interface Register { renderer:
+'webgpu' } }` (or `'webgl'`) narrows `state.renderer`, `state.gl`, `state.isLegacy`,
+  `state.internal.support` and `useRenderTarget` app-wide, so `useThree`, `useFrame` and `onCreated`
+  need no cast on the root entry. Nothing registered keeps the union. Same pattern as
+  `@react-three/tsl`'s `Register`. See [TypeScript](./docs/API/typescript.mdx#typing-the-renderer).
+- The Canvas `renderer` prop is typed. It used to be `any`; it now accepts `true`, a renderer
+  instance or factory (structural, like `gl`), or a props bag of `WebGPURendererParameters`,
+  renderer properties and the config keys, with autocomplete and typo checking.
+- `@react-three/tsl`: uniforms typed by name through a `Register` interface. Register your
+  uniform objects once (`declare module '@react-three/tsl' { interface Register { uniforms: typeof
+globalUniforms; scopes: { player: typeof playerUniforms } } }`) and `state.uniforms` (in
+  `useFrame`, `useThree` and handlers), a creator's `uniforms`, `useUniforms()`,
+  `useUniforms('player')` and `useUniform('uTime')` are typed without generics or casts; creators
+  are checked against registered keys. Strict by default (unknown root keys are errors, catching
+  typos); `strict: false` in `Register` allows them. With nothing registered, reads by name use the
+  loose types described in the next entry. See [Typed Resources](./docs/webgpu/typed-resources.mdx).
+- `@react-three/tsl`: unregistered reads by name work in TSL without casts. `useUniforms()`,
+  `useUniforms('scope')`, `useUniform('name')`, a creator's `uniforms`, and `state.uniforms` in
+  `useFrame`/`useThree` return `LooseUniformNode`s; `useNodes()`, `useNodes('scope')`, a creator's
+  `nodes` and `state.nodes` return `LooseNode`s. They used to be `UniformNode<unknown>` and
+  `NodeLike`, which have no operator methods (three's types only give those to a node of known
+  type) and can't be called, so `uTime.mul(2)`, `material.colorNode = uColor` or
+  `nodes.rimLightFn()` needed a cast. The loose types have every member of three's nodes (and of an
+  `Fn()`, callable) typed `any`: operators, TSL functions and material slots accept them, a
+  misspelt member is still an error, and one `as` gives the exact type (`uniforms.uDir as
+UniformNode<'vec3', Vector3>`). Schemas (`useUniforms<{ blur: number }>('fx')`,
+  `useUniform<Color>('uTint')`) and registered names stay exact. With `strict: false`, unregistered
+  root keys read the same way. Writing a concrete node straight into `state.uniforms` or
+  `state.nodes` with `setState` (instead of through the hooks) now needs a cast. Buffers and GPU
+  storage keep their `BufferLike` / `StorageLike` unions. See
+  [What stays loose](./docs/webgpu/typed-resources.mdx#what-stays-loose).
+- `@react-three/tsl`: nodes register like uniforms. `Register` takes `nodes` (root-level nodes by
+  node type, e.g. `ReturnType<typeof sharedNodes>`) and `nodeScopes`; `useNodes()`,
+  `useNodes('fx')`, `state.nodes` and a creator's `nodes` are then typed by name, root typos are
+  errors under the shared `strict` flag, and creators are checked against the registered types. A
+  creator call can no longer fall through to `useNodes`' broad overload unless its scope is a
+  runtime `string | undefined`. See
+  [Register your nodes](./docs/webgpu/typed-resources.mdx#register-your-nodes).
+- `@react-three/tsl`: buffers and GPU storage register too, completing `Register` for every resource
+  family. `buffers` / `bufferScopes` and `gpuStorage` / `gpuStorageScopes` type `useBuffers()`,
+  `useBuffers('particles')` (the scope name autocompletes), `useGPUStorage()`,
+  `useGPUStorage('terrain')`, `state.buffers` / `state.gpuStorage` and a creator's `buffers` /
+  `gpuStorage` by name; root typos are errors under the shared `strict` flag, and creators are
+  checked against the registered types (only a runtime `string | undefined` scope skips the check).
+  Unregistered reads keep their `BufferLike` / `StorageLike` unions. See
+  [Register buffers and GPU storage](./docs/webgpu/typed-resources.mdx#register-buffers-and-gpu-storage).
+- Docs: the "Typed Uniforms" page is now [Typed Resources](./docs/webgpu/typed-resources.mdx)
+  (`docs/webgpu/typed-uniforms.mdx` → `typed-resources.mdx`), since it covers uniforms, nodes,
+  buffers and GPU storage. Its place in the WebGPU section is unchanged.
+- `configureTSL({ uniforms, scopes })` creates registered uniforms on every primary canvas up
+  front, including canvases already mounted, so registered types hold before the first frame.
+  Secondaries and portals see them like any shared uniform, and hooks that declare the same names
+  reuse those nodes.
+- New package `@react-three/tsl` with the TSL resource hooks. It builds on
+  `@react-three/fiber/extension`, so it adds no second copy of fiber to an app whichever fiber
+  entry the app uses.
+- `registerRootExtension` and `setRenderOverride`: a small, public way for packages building on R3F
+  to attach per-root setup, cleanup and hot-reload handling, and to replace the default render call
+  while keeping its `fps` throttle, error reporting and user render-phase takeover. See
+  [Extending the root](./docs/API/additional-exports.mdx#extending-the-root).
+- New `@react-three/fiber/extension` entry for those packages. It contains only `useStore`,
+  `useThree`, `useFrame`, `context`, the two functions above and the types, imports nothing from
+  three, and works under a `<Canvas>` from any entry, so an extension no longer drags a second copy
+  of core into apps that use a different entry.
+- `@react-three/tsl`: `useLocalNodes` takes a `useMemo`-style dependency array as its second argument. No array
+  re-evaluates the creator on every component render (including a `useCallback` creator, which
+  previously opted out via identity memoization - pass `[]` instead); `[]` reuses the result across
+  ordinary renders; `[a, b]` rebuilds when a declared JavaScript construction input changes by
+  `Object.is`. Registered-resource replacement, a change of owning store and HMR / `rebuild*`
+  invalidation remain independent triggers in every mode, and always run the current render's
+  creator ([#3918](https://github.com/pmndrs/react-three-fiber/issues/3918), part 1 of
+  [#3888](https://github.com/pmndrs/react-three-fiber/issues/3888)).
+- `@react-three/tsl`: `useLocalNodes` re-runs only when a shared resource its creator read changes.
+  It used to subscribe to the whole `uniforms`, `nodes` and `textures` maps, so registering any
+  uniform anywhere re-rendered every consumer and rebuilt its graph. Now reads through the
+  creator's `state` are tracked by identity (`uniforms.x`, `.scope('s').x`, dot access into a
+  scope, `has`, `keys`, `textures.get(url)`, iteration): an unrelated registration causes neither a
+  render nor a rebuild, and `buffers` and `gpuStorage` reads are tracked too (they were not
+  subscribed at all). Only reads made before the creator returns count; a lookup inside a deferred
+  `Fn` body warns in development. `useNodes`, `useUniforms`, `useBuffers` and `useGPUStorage`
+  creators warn in development when they read an entry that does not exist yet, since they will not
+  re-run when it appears ([#3919](https://github.com/pmndrs/react-three-fiber/issues/3919), part 2
+  of [#3888](https://github.com/pmndrs/react-three-fiber/issues/3888)).
+- `@react-three/tsl`: `useLocalNodes` install form. A creator can return a function instead of a
+  record: the creator builds during render, and the function runs after commit (a layout effect)
+  to put the nodes onto a Three object, returning a cleanup that runs before the next install and
+  on unmount. This replaces returning a placeholder record plus a separate `useThree` and
+  `useEffect` for `scene.fogNode` and similar, and never mutates a Three object during render. The
+  hook returns nothing in this form; a creator that returns nothing is a type error and warns in
+  development ([#3890](https://github.com/pmndrs/react-three-fiber/issues/3890),
+  [#3893](https://github.com/pmndrs/react-three-fiber/issues/3893)).
+- A texture `useTexture` loads is visible to a `useLocalNodes` creator later in the same render:
+  `textures.get(url)` no longer comes back empty on the first render after a fresh load, and the
+  creator does not rebuild when the registration lands. `useTexture` stages what it loaded during
+  render (no store write, no refcount) and registers it in its layout effect as before; a render
+  React discards registers and retains nothing. `@react-three/fiber/extension` exports
+  `getTextureView(store)`, the registry including those staged textures
+  ([#3895](https://github.com/pmndrs/react-three-fiber/issues/3895)).
+- `@react-three/eslint-plugin`: `prefer-local-nodes-deps` (in `recommended`) flags `useLocalNodes`
+  with an inline creator and no dependency array, which rebuilds the graph on every render. When
+  the creator reads values from the component it names them and points to a uniform first, rather
+  than asking for them to be declared; otherwise it offers `[]` as a suggestion.
+- Fixed-timestep phases from `@pmndrs/scheduler` 0.3. Besides `physics`, any phase can be given a
+  step with `addPhase(name, { timestep, maxSubsteps })` or `setPhaseTimestep(name, step)`.
+  `state.overstep` (in `[0, 1)`) is the fraction of the next step already banked, for interpolating
+  what is rendered between the last two simulated states; in-Canvas `useFrame` callbacks receive it.
+  Each root reports its jobs' errors to its own Canvas, and a driver restarted from inside a frame no
+  longer runs two loops.
+- Changing a material prop that is compiled into the shader sets `material.needsUpdate`, so the new
+  value takes effect without an effect that sets it by hand: `transparent`, `vertexColors`,
+  `flatShading`, `fog`, `side`, `alphaHash`, `premultipliedAlpha`, `blending`, `alphaToCoverage`,
+  `dithering`, `sizeAttenuation`, `combine`, `normalMapType` and `depthPacking`, and a texture slot
+  (`map`, `normalMap`, `envMap`, ...) gaining or losing its texture. Swapping one texture for
+  another, uniform-backed props (`color`, `opacity`, `roughness`, ...) and props three already
+  handles (`wireframe`, `alphaTest`, ...) leave the program alone
+  ([#3892](https://github.com/pmndrs/react-three-fiber/issues/3892),
+  [#3993](https://github.com/pmndrs/react-three-fiber/pull/3993)).
+- `root.configure()` runs synchronously unless the renderer is created asynchronously, and the first
+  `root.render()` mounts within the caller's commit. Every root exposes `ready`, a promise carrying
+  the `status` field React's `use` reads, which is pending only while an async renderer is being
+  created. `<Canvas>` commits its scene in its own layout effect, so `onCreated` runs while the
+  Canvas is mounted and events are connected before paint; with an async renderer it suspends an
+  empty sibling instead of the canvas, and a renderer factory that rejects reaches the nearest error
+  boundary. Port of [#3925](https://github.com/pmndrs/react-three-fiber/pull/3925)
+  ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- `<Activity>` visibility reaches into the Canvas: a scene under a hidden `<Activity>` is hidden
+  along with the DOM around it. Port of
+  [#3946](https://github.com/pmndrs/react-three-fiber/pull/3946)
+  ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- The canvas follows `devicePixelRatio` changes, such as moving to another display or zooming: a
+  `dpr` range is re-resolved against the new ratio, unless `setDpr()` overrode it. Watching is
+  best-effort and never fails configuration, so `matchMedia` stubs in tests keep working. Port of
+  [#3959](https://github.com/pmndrs/react-three-fiber/pull/3959)
+  ([#3975](https://github.com/pmndrs/react-three-fiber/pull/3975)).
+
+### Changes
+
+- `useRenderPipeline` renders through `setRenderOverride`; the default render job no longer reads
+  `state.renderPipeline`. Behaviour is unchanged.
+- `<Canvas>` hot-reload handling notifies registered extensions instead of calling the TSL cache
+  refresh directly. `@react-three/tsl` registers its extension when it is imported.
+- `@react-three/fiber/webgpu` also exports the base state type as `BaseRootState` (the entry's
+  `RootState` is `WebGPURootState`, which extends it). `useStore()`, `state.get()` and
+  `primaryStore` are typed with it, and packages that add fields to `RootState` augment it.
+- Portals pick up parent state they inherit when it changes after they mount (a later uniform,
+  `controls` or `renderer`). Before, the portal's copy of the parent state won on every later change,
+  so everything except `size`, `events` and `viewport` stayed as it was at mount. What a portal owns
+  is unchanged: its own scene, fields set through its `state` prop, and fields it sets itself (a
+  camera or controls made default inside it, as drei's `Hud`, `RenderTexture` and `View` do) are
+  never overwritten by the parent.
+- `useFrame(callback, negativeNumber)` logs a one-time deprecation notice. v10 maps the number to
+  `{ priority }`, which runs higher numbers first, so a negative number that meant "before the
+  default jobs" in v9 now runs after them. Name the dependency with `{ before, after }` instead
+  ([#3931](https://github.com/pmndrs/react-three-fiber/pull/3931)).
+- A `<Canvas>` re-render re-applies only the inputs that changed, so settings changed at runtime
+  (`setDpr`, `setFrameloop`, `performance`, `gl.shadowMap`, ...) survive it, and an inline
+  `onPointerMissed` no longer counts as a change. Removing a prop applies its default. Port of [#3945](https://github.com/pmndrs/react-three-fiber/pull/3945)
+  ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+
+### Fixes
+
+- `state.gl` no longer logs its deprecation for apps that never read it. @pmndrs/scheduler spreads
+  root state into each frame state, and under Vite's dev server its pre-bundled frames
+  (`_Scheduler2.tickRoot` in `@pmndrs_scheduler.js`) slipped past the check for library reads, so
+  every WebGPU app saw the notice. The scheduler now gets a copy of the state whose `gl` reads
+  silently; frame states still carry `gl`, and a real read (drei's `OrbitControls`) still warns.
+
+- Multi-canvas works under the WebGL2 fallback. When the primary's `WebGPURenderer` fell back to
+  WebGL2 (no `navigator.gpu`), a secondary drew its scene into the primary's canvas and stayed
+  blank, since a WebGL context is bound to the element it was created on. A secondary whose primary
+  fell back now builds its own renderer, forced onto the same backend, and is a standalone root that
+  owns it (`internal.sharedRendererFallback`, not `isSecondary`): it keeps its own TSL state, wires
+  and removes its own XR listeners, and its renderer is disposed when it unmounts, independently of
+  the primary. Thanks @rubenmarcus
+  ([#3965](https://github.com/pmndrs/react-three-fiber/issues/3965),
+  [#3977](https://github.com/pmndrs/react-three-fiber/pull/3977)).
+- A secondary canvas sharing the primary's renderer no longer applies its own `shadows`, sRGB /
+  ACES defaults or `renderer` props to it, which turned the primary's shadows off and reset its
+  tone mapping, and no longer adds XR session listeners to it that were never removed. Thanks
+  @rubenmarcus ([#3981](https://github.com/pmndrs/react-three-fiber/issues/3981),
+  [#3983](https://github.com/pmndrs/react-three-fiber/pull/3983)).
+- Constructor-only `renderer` options (`forceWebGL`, `depth`, `stencil`, `logarithmicDepthBuffer`,
+  `reversedDepthBuffer`, `outputBufferType`, `multiview`, `getFallback`, `trackTimestamp`, besides
+  `antialias`, `alpha`, `samples`, `powerPreference`) are passed to the constructor only and no
+  longer re-applied to the live renderer as stray properties. R3F's own settings (`shadows`,
+  `textureColorSpace`) are no longer passed to the constructor.
+- A `<Canvas>` removed while an `<Activity>` hides it releases its root. Hiding already ran the
+  Canvas' effect cleanups, so removing it while hidden left the root, its frame jobs and its
+  renderer running ([#3978](https://github.com/pmndrs/react-three-fiber/issues/3978)).
+- Importing any entry no longer breaks JSX whose tag is typed `React.ElementType`
+  (`<IconComponent size={size} />` failed with "Type 'number' is not assignable to type 'never'").
+  `ThreeToJSXElements` drops three's non-constructor exports (constants, functions, namespaces)
+  from `JSX.IntrinsicElements` instead of mapping them to `never`-valued elements
+  ([#3898](https://github.com/pmndrs/react-three-fiber/issues/3898)).
+- `@react-three/tsl`: the reader forms `useUniforms()`, `useUniforms('scope')`, `useNodes()`,
+  `useNodes('scope')` and those of `useBuffers` and `useGPUStorage` see entries a parent component
+  declares in the same render, as creators already did. A child renders before its parent's
+  registration lands on the store, so its first render got `undefined`, and anything it built from
+  that during commit kept it. The `WebGPUMotionBlur` example rendered a blank canvas this way: its
+  render pipeline compiled with `velocity * null`.
+- `@react-three/tsl`: on a secondary canvas, a `useLocalNodes` creator's `scene`, `camera` and
+  `textures` are that canvas's own. They were the primary canvas's, so an install step on a
+  secondary would have written the primary's `scene.fogNode`. The TSL maps still come from the
+  primary, where they are shared.
+- Secondary canvases share the primary canvas's TSL maps: `state.uniforms`, `state.nodes`,
+  `state.buffers` and `state.gpuStorage` on a secondary are the primary's objects, kept in step. In
+  `useFrame`, `useThree(s => s.uniforms)` and handlers on a secondary they used to be empty, since the
+  hooks wrote to the primary.
+- `useUniform` on a secondary canvas registers on the primary, where `useUniforms` looks. It used to
+  register on the secondary's own store.
+- `@react-three/tsl`: `useUniform(name, value)` tracks `value`. A later render with a different value
+  (deep-compared, so an equal but freshly built object does not count) updates the uniform's `.value`
+  in place; it used to keep the first value forever
+  ([#3885](https://github.com/pmndrs/react-three-fiber/issues/3885)).
+- `@react-three/tsl`: TSL constant inputs (`color('red')`, `vec3(0, 1, 0)`, `float(1)`) are read
+  through the `VarNode` three's constructors wrap them in. `useUniforms` saw a changed input on
+  every render and wrote the `VarNode` itself into the uniform's `.value`.
+- `@react-three/tsl`: `useUniforms` and `useUniform` type TSL constant inputs as three's exact
+  uniform node: `{ a: int(1), b: vec2(0, 1), c: color('red') }` gives `UniformNode<'int', number>`,
+  `UniformNode<'vec2', Vector2>` and `UniformNode<'color', Color>`
+  ([#3769](https://github.com/pmndrs/react-three-fiber/issues/3769)).
+- `@react-three/fiber/extension`'s type declarations no longer include the global JSX element
+  augmentation, which conflicted with `/legacy`'s for any package built on the extension entry.
+- `@react-three/fiber/legacy`: `useThree`, `useFrame` and `Canvas`'s `onCreated` are typed against
+  `LegacyRootState`, so `state.renderer` is a `WebGLRenderer` without a cast. The entry already
+  exported `LegacyRootState as RootState`, but the hooks returned the base state.
+- A renderer R3F created for a Canvas is disposed once the last canvas rendering through it has
+  unmounted, so a `WebGPURenderer` built for `<Canvas renderer />` no longer outlives its root with
+  its GPU device ([#3926](https://github.com/pmndrs/react-three-fiber/issues/3926)). R3F owns what it
+  builds (the default, a config bag, or a factory's result); a renderer instance passed to `renderer`
+  or `gl` stays the caller's and is never disposed, nor is a caller's `WebGLRenderer` force-lost any
+  more. A secondary canvas keeps the primary's renderer alive until it unmounts too. An owned
+  `WebGLRenderer` loses its context even when `dispose()` throws, and since `WebGPURenderer.dispose()`
+  is async from three r186, the `unmountComponentAtNode` callback runs once that dispose has settled.
+- Roots are torn down when React commits the unmount, not after a 500 ms timer, and configuring or
+  rendering the same canvas before that commit cancels the teardown.
+- Using a node material on a WebGL (`/legacy`) canvas throws a clear error naming the fix (import
+  `Canvas` from `@react-three/fiber`), instead of three failing on the first frame with
+  `Cannot read properties of undefined (reading 'replace')`. Covers node material elements,
+  `<primitive>` and the `material` prop
+  ([#3889](https://github.com/pmndrs/react-three-fiber/issues/3889),
+  [#3995](https://github.com/pmndrs/react-three-fiber/pull/3995)).
+- Removing an object with `frameloop="demand"` requests a frame, so it no longer stays on screen
+  until something else invalidates
+  ([#3980](https://github.com/pmndrs/react-three-fiber/issues/3980),
+  [#3989](https://github.com/pmndrs/react-three-fiber/pull/3989)).
+- `useEnvironment.clear()` after `useEnvironment.preload()` waits for the decoder the preload is
+  still importing, so the preloaded entry is actually cleared
+  ([#3972](https://github.com/pmndrs/react-three-fiber/pull/3972)).
+- An object's own `visible` survives being hidden and revealed by `<Activity>` or Suspense, including
+  a `visible` prop that changed while it was hidden. Port of
+  [#3944](https://github.com/pmndrs/react-three-fiber/pull/3944)
+  ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- Pointer capture survives an instance being reconstructed, including a capture held by an ancestor
+  of the reconstructed object ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- Canvas size and viewport are updated together, so a store subscriber never sees one without the
+  other ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- A root remounted on the same `id` waits for the previous root's scheduler cleanup before reusing
+  the id ([#4007](https://github.com/pmndrs/react-three-fiber/pull/4007)).
+- `extend(SomeClass)` hands out element ids that are unique across copies of fiber, including a copy
+  from an earlier alpha that still counts locally: ids already taken in the shared catalogue are
+  skipped ([#3923](https://github.com/pmndrs/react-three-fiber/pull/3923),
+  [#4009](https://github.com/pmndrs/react-three-fiber/pull/4009)).
+- `useFrame` job ids are unique across renderers. They were `React.useId()`, which react-dom and
+  every copy of fiber's reconciler count from zero on their own, and with scheduler 0.3's global job
+  index, unmounting one of two colliding jobs could leave it running
+  ([#4009](https://github.com/pmndrs/react-three-fiber/pull/4009)).
+- `state.gl` on a WebGPU root aliases the renderer, with its one-time deprecation notice. It was
+  `null`, because the store's accessor did not survive zustand's state updates, so drei's
+  `OrbitControls`, `Environment` and `Preload` threw on `gl.domElement` / `gl.compile`, and the
+  notice never showed. The root and portal stores now keep the `gl` / `renderer` accessors on every
+  state object ([#4014](https://github.com/pmndrs/react-three-fiber/issues/4014),
+  [#4016](https://github.com/pmndrs/react-three-fiber/pull/4016)).
+- Image backgrounds and environments load. `<Canvas background>`, `<Environment files>` and
+  `useEnvironment` share one loader path, and several common inputs failed on it:
+  - `.png`, `.webp`, `.avif` and `.gif` threw "Unrecognized file extension"; they load as an sRGB
+    equirect through three's `TextureLoader` (a `data:image/` URL of one too).
+  - A plain `.jpg` threw, since every JPEG went to `UltraHDRLoader`, which rejects one without a gain
+    map. The file is fetched once: an Ultra HDR JPEG decodes as linear HDR as before, any other
+    decodes from the same bytes as an sRGB image.
+  - A query or hash after the extension (`sky.hdr?v=2`, `sky.png#rev`) broke the format detection,
+    and a bare `sky.png?v=2` or a `data:` URL given to `background` was parsed as a color.
+  - `background={0x000000}` was ignored, `0` being read as unset.
+  - `background={{ preset, backgroundMap }}` showed the preset as the backdrop, not the map, and
+    `background={{ backgroundMap }}` alone also tried to load six default cube faces (`/px.png` ...)
+    for the environment; it now sets only the backdrop.
+
+### Examples
+
+- `FixedTimestep`: one simulation drawn raw and interpolated by `state.overstep`, with the `physics`
+  timestep switchable live.
+- `AutoNeedsUpdate`: toggles shader-shaping material props and a texture slot with no manual
+  `needsUpdate`, on WebGPU or WebGL.
+- `WebGPUShareOptOut`: a primary, an automatically sharing canvas, `share="id"` and `share={false}`,
+  each labelled with the renderer it actually uses.
+- `WebGPUPrimaryOnly` uses `<Canvas primary>`, and `UseFramePhases` sets the fixed `physics` timestep
+  instead of throttling it with `fps`.
+- The `legacy` demos import from `@react-three/fiber/legacy`; they relied on the default import
+  rendering with WebGL ([#4013](https://github.com/pmndrs/react-three-fiber/pull/4013)).
+- The demos pass the eslint-plugin `migration` config: no boolean `<Canvas renderer>`, no
+  `@react-three/fiber/webgpu` imports, and `<Canvas background>` instead of
+  `<color attach="background">`.
+
+### eslint-plugin
+
+- **Breaking:** `configs.recommended` and `configs.all` are flat configs, and the default export is
+  the plugin object for `eslint.config.js`. eslintrc users switch to
+  `plugin:@react-three/legacy-recommended` / `plugin:@react-three/legacy-all`. `eslint` moved to
+  `peerDependencies` (`^8.57.0 || ^9.0.0 || ^10.0.0`), and the plugin is tested against ESLint 10,
+  9 and 8 (flat and eslintrc).
+- New rule `no-fast-state` (in `recommended`, from [RFC #2701](https://github.com/pmndrs/react-three-fiber/issues/2701)):
+  flags `useState`/`useReducer` setters, `setX` props and the R3F store's `set`/`setSize`/`setDpr`/
+  `setEvents`/`setFrameloop` called in the frame loop. Calls behind a condition are allowed, as the
+  RFC settled for polling; `{ allowGuarded: false }` reports them too.
+- New rule `prefer-useloader` (in `recommended`, from the same RFC): flags `load()`/`loadAsync()` on a
+  `new XLoader()` (or a variable holding one) inside `useEffect`, `useLayoutEffect`,
+  `useInsertionEffect`, `useMemo` or a `useState` initialiser, and points to `useLoader`/`useTexture`.
+- The frame loop rules (`no-new-in-loop`, `no-clone-in-loop`, `no-fast-state`) see every per-frame
+  callback: `useFrame` through an imported alias or a namespace, callbacks passed by reference
+  (function declarations, function expressions, `useCallback`), and `addEffect`, `addAfterEffect`,
+  `setRenderOverride` and the scheduler's `register`. Only the callback is checked, not the options
+  argument. `no-new-in-loop` no longer reports `throw new X()` or `new SomethingError()`, which only
+  run on the failure path.
+- The `codegen:eslint` script runs again (it failed under the ESM root), and generates the flat configs.
+- New `recommended` rules:
+  - `no-unstable-args`: new objects, literals, functions or `.clone()` in `args` or
+    `<primitive object>`, which rebuild the three.js object on every render.
+  - `no-inline-node-props`: TSL nodes built inline in a material's `*Node` prop, which recompile the
+    shader on every render.
+  - `no-deferred-resource-read`: shared resources read inside `Fn()` in a `useLocalNodes` creator,
+    where the read is not tracked.
+  - `no-creator-side-effects`: assignments to the scene, camera or renderer in a TSL hook creator,
+    and `useNodes`/`useLocalNodes` creators that return nothing.
+  - `no-invalid-dispose`: `dispose` values other than `null`, which are ignored (fixes `false`).
+  - `no-nested-fromref`: `fromRef()` inside an array or object, where it is never resolved.
+  - `canvas-entry-compat`: Canvas props, materials and events the Canvas entry does not support
+    (`gl` on `@react-three/fiber`, `renderer` on `/legacy`, node materials on `/legacy`, GLSL
+    materials on `@react-three/fiber`, ...).
+- `no-fast-state` also checks `onPointerMove` and `onWheel` handlers on three.js elements (`events`
+  option), and `prefer-local-nodes-deps` checks creators passed by reference, including `useCallback`.
+- New `migration` config (`configs.migration`, `plugin:@react-three/legacy-migration`) for upgrading
+  from v9, most of it autofixable: `no-deprecated-gl`, `no-frame-clock`, `no-numeric-frame-priority`,
+  `no-removed-canvas-props`, `no-onupdate-prop`, `no-removed-imports` (including the deprecated
+  `/webgpu` entry), `no-deprecated-loop-globals` and `prefer-canvas-background`.
+- Rule doc links point at the `v10` branch, where the rule docs live until v10 merges to `master`.
+
+## 10.0.0-alpha.5
+
+Alpha 5 is a types release. The WebGPU resource hooks now carry three's exact node generics, the
+stale TSL augmentations are gone, and the built declarations are compiled by a strict consumer
+fixture on every build. Alongside it: the reconciler oddities that strict-TypeScript consumers
+surfaced while working around the old types, and the single-canvas depth-attachment fix.
+
+### Types
+
+- `useUniform` and `useUniforms` keep three's exact `UniformNode<TNodeType, TValue>` generics and
+  the input's exact keys. A `number` uniform is a `Node<'float'>`, so TSL math, `mix()` and
+  `bloom()` accept it without a cast; `.value` is typed; an unknown key is an error
+  ([#3769](https://github.com/pmndrs/react-three-fiber/issues/3769),
+  [#3886](https://github.com/pmndrs/react-three-fiber/issues/3886),
+  [#3887](https://github.com/pmndrs/react-three-fiber/issues/3887)).
+- `ScopedStore` distinguishes nested scopes from object-valued and callable (`Fn()`) leaves at
+  runtime, and `.scope(key)` accepts an explicit schema generic for cross-call access.
+- The stale `ShaderNodeObject` and `three/tsl` `Fn` augmentations are gone. three's own `Fn`
+  overloads, including the `Fn(fn, 'void')` statement-call form compute kernels use, are reachable
+  again with R3F installed.
+- `Matrix2` is an accepted uniform value (`mat2`), matching three's `uniform()` overloads.
+- `StorageLike` includes `Storage3DTexture` and `StorageArrayTexture`, so `useGPUStorage` accepts
+  what `compute.mdx` documents.
+- `once()` is typed as the value the prop declares: `translate={once(0, 0, 5)}` and
+  `center={once()}` typecheck without a cast.
+- On the `/webgpu` entry, `Canvas`'s `onCreated` receives `WebGPURootState`, so WebGPU-only
+  renderer members no longer need an `instanceof` narrow.
+- `pnpm verify-types` compiles a strict consumer fixture against the built declarations with
+  `skipLibCheck: false`, for every entry.
+- Reader-mode `useUniforms`, `useNodes`, `useBuffers` and `useGPUStorage` accept an explicit
+  schema: `useUniforms<{ blurAmount: number }>()` returns typed nodes for values registered
+  elsewhere, instead of `UniformNode<unknown>`.
+- `extend(THREE)` accepts a whole module namespace without a cast; only its constructors are
+  registered.
+- `raycaster={{ params: { Points: { threshold: 0.2 } } }}` typechecks: `params` is a partial,
+  matching the runtime merge into the raycaster's defaults.
+- `eventSource` accepts any DOM `Element`, so an `SVGRenderer`'s `<svg>` no longer needs a cast.
+- `<primitive>` keeps typed pointer events (`onClick={(e) => ...}` infers `e`) and accepts
+  arbitrary props for the wrapped object.
+- The examples compile under strict TypeScript without a single `as unknown as` cast; the
+  remaining `as any` sites are third-party gaps (three's `Backend`, `@use-gesture`) and are
+  commented as such.
+
+### Bug Fixes
+
+- `useTexture`'s `onLoad` receives the keyed record for record inputs, matching its declared type.
+  It was handed `useLoader`'s positional array, so `textures.map.wrapT` threw at runtime.
+- Prefixed elements (`<threeLine>`) no longer throw "ThreeLine is not part of the THREE namespace"
+  on their first prop update.
+- A removed prop resets to the class default for every class. Any class whose constructor takes
+  arguments (every material, geometry and camera) previously had the prop set to `0`, turning a
+  removed `color` black.
+- `fromRef(ref, transform)` maps the resolved sibling before assignment, so props that need the
+  sibling wrapped are declarative: `lightsNode={fromRef(lightRef, (l) => lights([l]))}`.
+- Six-file `.hdr` cube sets load through `HDRCubeTextureLoader` in `useEnvironment`,
+  `<Environment>` and the Canvas `background` prop, with linear color space.
+- A lone primary `<Canvas id>` owns the renderer's default canvas target, so its depth attachment
+  follows the layout instead of the element's construction size
+  ([#3905](https://github.com/pmndrs/react-three-fiber/pull/3905)).
+- Canvas honors the `resize.debounce` prop after the initial measurement
+  ([#3881](https://github.com/pmndrs/react-three-fiber/pull/3881)).
+- `useRenderPipeline` callbacks receive a `WebGPURenderer`-typed state, may not return the
+  hook-owned `scenePass`, and the hook's return narrows `renderPipeline` on `isReady`
+  ([#3901](https://github.com/pmndrs/react-three-fiber/pull/3901)).
+- The Pointcloud example's fragment shader handles point colors correctly.
+
+### Examples
+
+- The demo registry is the one table of contents; the app derives its groups from it. Adds
+  `WebGPUFog` and `WebGPUPrimaryOnly`, drops stale entries, and the examples cleanup from
+  [#3883](https://github.com/pmndrs/react-three-fiber/pull/3883).
+
+### eslint-plugin
+
+- `no-clone-in-loop` only flags `.clone()` calls. A loop variable named `clone` used as
+  `clone.position` no longer trips it.
+
+## 10.0.0-alpha.4
+
+Alpha 4 is a stabilization release for the new scheduler, WebGPU entry point, multi-canvas rendering,
+Suspense lifecycle and resource hooks introduced during the v10 alpha.
+
+### Features
+
+#### Canvas scheduling is root-scoped
+
+R3F now uses the root lifecycle and ordering APIs from `@pmndrs/scheduler@0.2`.
+
+- Every Canvas owns its `frameloop` mode and pending demand frames. A demand or never Canvas no longer
+  freezes an always-running sibling.
+- `invalidate(state)` targets that state’s root; stateless `invalidate()` retains its global fan-out.
+- State-bound `advance()` and XR frames step only their owning root; stateless `advance()` still steps
+  every root.
+- Resizes invalidate only the Canvas that changed, and scheduler roots unregister immediately on
+  unmount.
+- `useFrame` controls expose the owning `rootId` and a root-scoped `invalidate()`.
+
+Canvas ordering also moved from the default render job to the complete scheduler root:
+
+```tsx
+<Canvas
+  id="secondary"
+  renderer={{
+    primaryCanvas: 'main',
+    scheduler: { after: 'main', order: 1, fps: 40 },
+  }}
+/>
+```
+
+`before` and `after` accept one Canvas id or an array. Missing references remain dormant until the
+target mounts, and runtime configuration changes reorder the next frame. `order` supplies a numeric
+root order. `fps` remains scoped to the default render job, so other `useFrame` work can continue
+while rendering is throttled.
+
+#### WebGPU hooks use WebGPU state types
+
+`useThree` and `useFrame` imported from `@react-three/fiber/webgpu` now use `WebGPURootState`.
+`state.renderer`, `state.gl` and frame callback renderers are therefore typed as `WebGPURenderer`
+without casts. This is a types-only narrowing; the exported runtime hooks remain the core
+implementations.
+
+### Bug Fixes
+
+#### `useRenderPipeline` rebuilds now reach the GPU
+
+- Rebuilds set `RenderPipeline.needsUpdate`, so a changed `outputNode` recompiles instead of silently
+  continuing to render the first graph.
+- Replaced `scenePass` instances are disposed after the new graph is installed, preventing render
+  targets and MRT attachments from leaking.
+- The default passthrough follows the replacement pass instead of retaining a disposed target.
+- `reset()` disposes the pass it drops.
+- Setup and main callbacks now receive a state whose `renderPipeline` is correctly typed as
+  non-null.
+
+Application-created passes and effect nodes retain their existing ownership rules; broader disposal
+semantics remain a beta discussion in [#3864](https://github.com/pmndrs/react-three-fiber/issues/3864).
+
+#### Suspense no longer destroys the renderer root
+
+When a child suspends under React StrictMode, Canvas now distinguishes a temporarily hidden tree from
+a real DOM unmount. Showing an outer Suspense fallback no longer tears down and recreates the whole
+renderer root, preserving store identity and stateful GPU resources such as `useGPUStorage`.
+
+#### Array and record textures no longer loop
+
+`useLoader` preserves the returned array identity while its resolved values are unchanged, and
+`useTexture` derives stable signatures for inline array and record inputs. The registry effect no
+longer feeds its own subscriber render and ends in `Maximum update depth exceeded`.
+
+Cache invalidation still propagates correctly: if the same keys resolve to new resources, consumers
+receive a new result.
+
+#### Multi-canvas resize targets the correct Canvas
+
+Multi-canvas WebGPU resizing now updates the owning `CanvasTarget` rather than whichever target is
+currently active on the shared renderer. Deferred backend size updates flush only after that Canvas
+becomes the active target, preventing stale depth attachments and mismatched attachment-size
+validation errors.
+
+#### WebGPU imports and shader identifiers are safe
+
+- The three.js Inspector is loaded lazily, removing an eager `three/webgpu` import cycle that crashed
+  the entire WebGPU entry under Turbopack. This also removes the unused Inspector from normal bundles.
+- Scoped names created by `useGPUStorage`, `useBuffers`, `useNodes` and `useUniforms` are sanitized
+  into valid WGSL identifiers. Spaces, punctuation and leading digits no longer produce invalid
+  struct declarations.
+
+### Dependencies
+
+- `@pmndrs/scheduler` moves from `^0.1.0` to `^0.2.0` for root-scoped lifecycle, invalidation,
+  stepping and ordering.
+
+---
+
+## 10.0.0-alpha.3
+
+### Breaking Changes
+
+#### three.js peer floor raised to `>=0.185.0`
+
+The `three` peer range moved from `>=0.181.2` to **`>=0.185.0`**. **If you are on r181–r184 you cannot install alpha.3** — upgrade three alongside R3F.
+
+```diff
+- "three": ">=0.181.2"
++ "three": ">=0.185.0"
+```
+
+The floor moved because v10 now uses three's own APIs rather than shadowing them: `RenderPipeline` (renamed from `PostProcessing` in r183), `CubeRenderTarget`, and the real `UniformNode` types. Keeping a fallback path for older three meant maintaining a parallel implementation of types three already ships.
+
+#### `act` is no longer re-exported
+
+R3F's `act` was a re-export of React's own, deprecated in favour of importing it directly. It is now
+removed from the public surface.
+
+```diff
+- import { act } from '@react-three/fiber'
++ import { act } from 'react'
+```
+
+It is the same function, so this is an import change and nothing more.
+
+#### React peer range is `>=19.0 <19.3`
+
+v10 requires React 19, with an upper bound. The ceiling is deliberate and follows the same rule as
+the three range: we state the versions we have tested. It moves when a newer React is verified, not
+before.
+
+```json
+"react": ">=19.0 <19.3",
+"react-dom": ">=19.0 <19.3"
+```
+
 #### Removed Renderer Props
+
+> **These shipped in alpha.3, not alpha.2.** The alpha.2 notes described them, but the entries were
+> written after `v10.0.0-alpha.2` was tagged — "Removed Renderer Props" four days after, the shadow
+> default nineteen days after — so anyone reading the published alpha.2 notes was told this had
+> already happened when it had not. Moved here, where an alpha.2 → alpha.3 upgrader will meet them.
 
 Removed redundant renderer props that can be passed via `gl` or `renderer` props directly:
 
@@ -37,15 +758,58 @@ Removed redundant renderer props that can be passed via `gl` or `renderer` props
 + const toneMapping = renderer.toneMapping
 ```
 
-**Note:** `textureColorSpace` remains in RenderProps as it's R3F-specific.
+**Note:** `textureColorSpace` survives, but **not as a Canvas prop**. It moved into
+`ColorManagementConfig`, which is intersected into `GLProps` and `RendererProps` — so it goes inside
+the config bag, not at the top level:
 
-**Files changed:**
+```diff
+- <Canvas textureColorSpace="srgb" />
++ <Canvas gl={{ textureColorSpace: 'srgb' }} />
++ <Canvas renderer={{ textureColorSpace: 'srgb' }} />
+```
 
-- `packages/fiber/types/renderer.d.ts` - Removed props from RenderProps
-- `packages/fiber/types/store.d.ts` - Removed props from RootState
-- `packages/fiber/src/core/Canvas.tsx` - Removed prop destructuring and passing
-- `packages/fiber/src/core/renderer.tsx` - Simplified configure() logic
-- `packages/fiber/src/core/store.ts` - Removed from initial state
+#### Default shadow type is now `PCFShadowMap`
+
+Changed from `PCFSoftShadowMap` to match three r182 defaults. three deprecated `PCFSoftShadowMap` and
+improved the standard `PCFShadowMap`, so R3F aligns with upstream. The legacy `shadows` aliases
+`percentage` and `soft` still work, mapping to `PCFShadowMap` with a console warning.
+
+_(Also written into the alpha.2 notes after that tag — see the box above.)_
+
+#### `usePostProcessing` → `useRenderPipeline`
+
+three renamed `PostProcessing` to `RenderPipeline` in r183. `usePostProcessing` was a **public export**
+of `@react-three/fiber/webgpu` at alpha.2 and no longer exists, and the store key moved with it.
+
+```diff
+- import { usePostProcessing } from '@react-three/fiber/webgpu'
++ import { useRenderPipeline } from '@react-three/fiber/webgpu'
+
+- const { postProcessing } = useThree()
++ const { renderPipeline } = useThree()
+```
+
+#### Smaller breaking changes
+
+Individually minor, collectively enough to break a build — none of these were listed before.
+
+- **`useTexture({ cache })` now defaults to `true`.** Every URL-loaded texture enrols in the global
+  registry and persists until disposed. If you were relying on textures being collected, this reads
+  like a leak. Opt out per call with `{ cache: false }`.
+- **`useTextures()` return shape changed.** `textures` is now `all`; `addMultiple`, `remove`,
+  `removeMultiple` and `disposeMultiple` are gone; `dispose()` returns a boolean and is refcount-gated,
+  so it no longer disposes a texture another consumer still holds.
+- **Pointer-move raycasts are deferred to frame start by default** (`events.frameTimedRaycasts: true`).
+  Moves are now processed once per frame rather than per DOM event.
+- **The default camera is a child of `scene`.** This shifts every index in `scene.children` by one —
+  code doing `scene.children[0]` to reach the first rendered object now gets the camera.
+- **`advance()` is narrowed to `(timestamp: number)`.** Extra arguments are a type error.
+- **`Mutable<P>` now uses `-readonly`** rather than `P[K] | Readonly<P[K]>`, which affects every
+  `ThreeElement` prop type.
+- **`ObjectMap` is generic**, with `Record<>` members.
+- **Canvas CSS is `width: 100%; height: 100%`**, and `setSize(w, h, false)` is now unconditional.
+- **`TextureEntry` is no longer exported** from the default entry.
+- **`@react-three/test-renderer` entry paths and peer range changed** — see that package's changelog.
 
 ### Features
 
@@ -301,6 +1065,105 @@ import { once } from '@react-three/fiber'
 - `packages/fiber/src/core/utils/props.ts` - Integration of fromRef and once in applyProps
 - `packages/fiber/src/core/renderer.tsx` - Camera scene parenting logic, Portal support
 
+#### Frame Scheduler Extracted to `@pmndrs/scheduler`
+
+The frame scheduler is no longer bundled in fiber. It now ships as its own package,
+`@pmndrs/scheduler`, and is consumed as a normal dependency. Named phases, `before`/`after`
+constraints, per-callback fps throttling and the single shared RAF all behave as before.
+
+#### `useTextures` — Reactive Texture Registry
+
+**EXPERIMENTAL (A5).** A reactive, refcounted texture registry. The API may change before stable.
+
+### Bug Fixes
+
+- Fixed memory leak in `createPortal` where subscriptions to parent store were never cleaned up. When portals were created/destroyed frequently (e.g., with rapidly changing data), each portal subscribed to `previousRoot` but never unsubscribed, keeping the portal's zustand store and all its state in memory indefinitely.
+- Fixed portal `size` state being overwritten by parent resize events. Portals now correctly preserve their own size override when the root canvas resizes, matching the existing behavior for `events`. This also fixes nested portals ignoring their size configuration.
+- Fixed `setSize` not triggering a frame in demand mode. Now calls `scheduler.invalidate()` directly so `useFrame` callbacks can respond to size changes.
+- Fixed `state.frustum` being stale when read during the render phase. The frustum and visibility
+  checks now run via `{ before: 'render' }` rather than an unregistered `preRender` phase.
+- Fixed `autoUpdateFrustum` and `occlusion` Canvas props not being forwarded to `configure()` —
+  they fell through to the wrapper `<div>` instead.
+- Fixed the `background` URL detection regex, which was over-escaped and never matched.
+- Fixed HMR not clearing the buffer and GPU-storage caches, so only nodes/uniforms rebuilt.
+- Fixed multi-canvas TSL state not being shared: WebGPU hooks now resolve `primaryStore` when
+  present and fall back to the local store for single-canvas roots.
+- Fixed runtime `setFrameloop()` never reaching the scheduler, so imperative mode changes had no
+  effect on the RAF loop.
+- Fixed `useRenderPipeline` constructing `THREE.PostProcessing`, which three deprecated in r183 in
+  favour of `RenderPipeline` and which warns on construction. R3F now constructs `THREE.RenderPipeline`
+  directly — with the peer floor at r185 there is no version left to fall back for.
+- Fixed React 19.2's `cloneRootViewTransitionContainer` / `removeRootViewTransitionClone` host
+  methods throwing `Not implemented.`; they are now no-ops.
+- Fixed an async `gl` factory being invoked more than once when `configure()` calls overlapped.
+- Fixed the Canvas `fallback` not being visible when renderer setup failed — it lived inside
+  `<canvas>`, which browsers never paint.
+- Fixed pointer events silently dying after an `args`-triggered reconstruction.
+- Fixed `ShaderMaterial` uniforms losing their target reference across prop updates.
+- Added a custom `cacheKey` argument to `useLoader` / `.preload` / `.clear` for assets fetched
+  from URLs that change per request.
+- Fixed visibility handlers (`onFramed`/`onOccluded`/`onVisible`) keeping a stale closure. Handler
+  registration sat behind a check comparing the handler _count_, so swapping `onOccluded` for a
+  different function left the count unchanged and the registry kept a snapshot of the old closure.
+  Inline handlers (`onFramed={() => …}`) produce a new function every render, which is the common
+  case — so an updated callback would simply never fire. Registration now runs on every prop update
+  and updates in place, preserving the last-known visibility state instead of re-firing events for
+  transitions that did not happen.
+- **Fixed TSL hot module replacement rebuilding against stale scoped state.** Vite would hot-update
+  a WebGPU scene without a full reload, but the remounted scene reused the previous module's TSL
+  nodes: the first edit lost environment lighting, the second lost the mesh entirely, while a cold
+  reload of the same code was correct. Two causes in `webgpu/hooks/useNodes.tsx` — creator mode
+  called `store.setState` inside `useMemo` during render (producing a React "Cannot update … while
+  rendering" error on every HMR remount), and the creator-mode cache returned the old module's
+  nodes because nothing invoked the existing `rebuildNodes`/`_hmrVersion` bust on the HMR path.
+  Registration is now atomic and generation-aware. Verified live over three consecutive edits on a
+  real GPU.
+- Ported the reconciler hardening released in `@react-three/fiber@9.7.0`: removed pierced props
+  reset on their pierced target rather than the object root; reconstructed instances flushed in
+  `resetAfterCommit` so `args`/`primitive` changes apply even when the last updated sibling bailed
+  out.
+
+  Three parts of that port are **behaviour changes rather than fixes**, and are worth knowing about:
+  - **`commitUpdate` now syncs `instance.props` wholesale.** Removed props no longer linger, changed
+    reserved props (`onUpdate`, `dispose`) take effect — and imperative mutations survive a re-render
+    instead of being stomped by re-applied defaults. That last one is the change people will notice.
+  - **`dragenter`/`dragleave` moved from Discrete to Continuous priority**, matching react-dom.
+  - **The reconciler now schedules via microtasks.**
+
+### Examples
+
+- Added **NestedCamera** demo showcasing camera-attached headlights using the new Portal component
+  - Demonstrates figure-8 path camera movement
+  - Shows spotlights following camera orientation
+  - Located at `example/src/demos/default/NestedCamera.tsx`
+- Added **Layered Reality** demo showcasing multi-canvas rendering with HTML content sandwiched between two 3D layers
+  - Background canvas renders the main scene (ring, wireframe shapes)
+  - Foreground canvas renders in front of HTML using shared WebGPU renderer
+  - Demonstrates `renderer={{ primaryCanvas: 'id' }}` and render phase control
+  - Located at `example/src/demos/default/Layered.tsx`
+
+### Maintenance
+
+- `@react-three/test-renderer` now has a real build. It previously had no build script and no
+  `dist`, while `main`/`module`/`types` all pointed into `dist/` — it would have published broken.
+- Removed dead `Instance.deferredRefs`.
+- Renamed the last internal `PostProcessing`/`pp` identifiers to `RenderPipeline`/`pipeline`.
+- Dropped the dangling `heroes` entry from `pnpm-workspace.yaml`.
+- Corrected `pnpm ci` to `pnpm run ci` in CLAUDE.md and docs — pnpm reserves `ci` as a built-in,
+  so the documented command always errored instead of running the gate.
+- Stubbed the HDR loader in the background-preset test, which previously made a live network
+  request to raw.githack.com and failed offline.
+- Documentation consolidated into a single canonical home under `docs/`, with stale v9 API
+  references corrected and a CI link check added. Readmes beside source are now thin pointers.
+- The docs link check no longer fails on third-party hosts that are merely slow, and the
+  cc0textures links it kept tripping over now point at ambientCG, which is where that site moved.
+
+---
+
+## 10.0.0-alpha.2
+
+### Features
+
 #### Canvas Size Control
 
 Added `width` and `height` props to Canvas for explicit resolution control, enabling use cases like 4K video export independent of container size.
@@ -407,32 +1270,13 @@ Added automatic Hot Module Replacement (HMR) support for WebGPU TSL hooks. When 
 
 - Added `_hmrVersion: number` to RootState for coordinating HMR rebuilds
 
-#### Default Shadow Type: PCFShadowMap
-
-Changed the default shadow map type from `PCFSoftShadowMap` to `PCFShadowMap` to match Three.js r182 defaults. Three.js deprecated `PCFSoftShadowMap` and improved the standard `PCFShadowMap`, so R3F now aligns with upstream. Legacy shadow types (`percentage`, `soft`) are mapped to `PCFShadowMap` with a console warning.
-
 ### Bug Fixes
 
-- Fixed memory leak in `createPortal` where subscriptions to parent store were never cleaned up. When portals were created/destroyed frequently (e.g., with rapidly changing data), each portal subscribed to `previousRoot` but never unsubscribed, keeping the portal's zustand store and all its state in memory indefinitely.
-- Fixed portal `size` state being overwritten by parent resize events. Portals now correctly preserve their own size override when the root canvas resizes, matching the existing behavior for `events`. This also fixes nested portals ignoring their size configuration.
-- Fixed `setSize` not triggering a frame in demand mode. Now calls `scheduler.invalidate()` directly so `useFrame` callbacks can respond to size changes.
 - Fixed `useNodes()` and `useUniforms()` reader modes not updating when store changes
 - Fixed `usePostProcessing` callbacks not re-running after HMR due to stale ref guards
 - Fixed absolute Windows paths appearing in bundled type declarations by defining `FiberRoot` locally instead of importing from `react-reconciler`
 - Fixed eslint-plugin codegen script not awaiting prettier format before writing files
 - Fixed type exports in `reconciler.d.ts` and `three.d.ts` to properly export Three.js types
-
-### Examples
-
-- Added **NestedCamera** demo showcasing camera-attached headlights using the new Portal component
-  - Demonstrates figure-8 path camera movement
-  - Shows spotlights following camera orientation
-  - Located at `example/src/demos/default/NestedCamera.tsx`
-- Added **Layered Reality** demo showcasing multi-canvas rendering with HTML content sandwiched between two 3D layers
-  - Background canvas renders the main scene (ring, wireframe shapes)
-  - Foreground canvas renders in front of HTML using shared WebGPU renderer
-  - Demonstrates `renderer={{ primaryCanvas: 'id' }}` and render phase control
-  - Located at `example/src/demos/default/Layered.tsx`
 
 ### Maintenance
 
@@ -445,10 +1289,6 @@ Changed the default shadow map type from `PCFSoftShadowMap` to `PCFShadowMap` to
 
 ### Files Changed
 
-- `packages/fiber/src/core/utils/fromRef.ts` - **NEW** Deferred ref resolution utility
-- `packages/fiber/src/core/utils/once.ts` - **NEW** Mount-only method call utility
-- `packages/fiber/src/core/utils/props.ts` - Integration of fromRef and once in applyProps
-- `packages/fiber/src/core/renderer.tsx` - Camera scene parenting logic, Portal support
 - `packages/fiber/src/webgpu/hooks/ScopedStore.ts` - **NEW** Type-safe proxy wrapper for uniform/node access
 - `packages/fiber/src/core/Canvas.tsx` - HMR detection and auto-refresh
 - `packages/fiber/src/core/store.ts` - Added `_hmrVersion` to initial state
@@ -460,8 +1300,6 @@ Changed the default shadow map type from `PCFSoftShadowMap` to `PCFShadowMap` to
 - `packages/fiber/types/canvas.d.ts` - Added `hmr` prop type
 - `packages/fiber/types/reconciler.d.ts` - Fixed type exports
 - `packages/fiber/types/three.d.ts` - Fixed type exports
-- `example/src/demos/default/NestedCamera.tsx` - **NEW** Camera headlights demo
-- `docs/v10-features.md` - Camera parenting, Portal, fromRef, once documentation
 
 ---
 

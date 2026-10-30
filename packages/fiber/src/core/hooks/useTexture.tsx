@@ -1,6 +1,8 @@
 // Migrated from Drei
-import { Texture as _Texture, TextureLoader } from '#three'
+import type { Texture as _Texture } from 'three'
+import { getThree, hasThree, whenThree } from '../three'
 import { useLoader, useThree, useStore } from './'
+import { stageTextures, unstageTextures } from '../utils/textureStaging'
 import { useLayoutEffect, useEffect, useMemo, useRef, ReactNode } from 'react'
 
 //* Types ==============================
@@ -22,11 +24,16 @@ export type UseTextureOptions<Url extends string[] | string | Record<string, str
   /** Callback when texture(s) finish loading */
   onLoad?: (texture: MappedTextureType<Url>) => void
   /**
-   * Cache the texture in R3F's global state for access via useTextures().
-   * When true:
+   * Register the texture(s) in R3F's global texture registry for access via useTextures().
+   * When true (the default):
    * - Textures persist until explicitly disposed
-   * - Returns existing cached textures if available (preserving modifications like colorSpace)
-   * @default false
+   * - On mount, returns existing registered textures if available (preserving modifications like colorSpace)
+   *
+   * Reads are taken once at mount — a mounted `useTexture` does not re-render when the registry
+   * changes. To react to registry swaps, use `useTextures(s => s.get(key))` instead.
+   *
+   * Pass `false` to opt out of registry enrollment entirely.
+   * @default true
    */
   cache?: boolean
 }
@@ -38,6 +45,20 @@ function getUrls(input: string | string[] | Record<string, string>): string[] {
   if (typeof input === 'string') return [input]
   if (Array.isArray(input)) return input
   return Object.values(input)
+}
+
+/**
+ * A value-equal signature for any input form, used to key memos off the input's *contents*
+ * rather than its reference. The record form includes its keys: two records can share the same
+ * URLs while mapping them to different names, and those are not interchangeable.
+ */
+function inputSignature(input: string | string[] | Record<string, string>): string {
+  if (typeof input === 'string') return input
+  if (Array.isArray(input)) return input.join('\0')
+  return Object.keys(input)
+    .sort()
+    .map((key) => `${key}\0${input[key]}`)
+    .join('\u0001')
 }
 
 /** Check if all URLs exist in the texture cache */
@@ -87,15 +108,18 @@ function buildFromCache<Url extends string[] | string | Record<string, string>>(
  *   normal: '/normal.png'
  * })
  *
- * // With caching - returns same texture object across components
- * // Modifications (colorSpace, wrapS, etc.) are preserved
- * const diffuse = useTexture('/diffuse.png', { cache: true })
+ * // Textures are registered in the global registry by default — the same texture
+ * // object is shared across components and modifications (colorSpace, wrapS, etc.) are preserved
+ * const diffuse = useTexture('/diffuse.png')
  * diffuse.colorSpace = THREE.SRGBColorSpace
  *
  * // Another component gets the SAME texture with colorSpace already set
- * const sameDiffuse = useTexture('/diffuse.png', { cache: true })
+ * const sameDiffuse = useTexture('/diffuse.png')
  *
- * // Access cache directly
+ * // Opt out of registry enrollment for a one-off texture
+ * const scratch = useTexture('/scratch.png', { cache: false })
+ *
+ * // Access the registry directly
  * const { get } = useTextures()
  * const cached = get('/diffuse.png')
  * ```
@@ -107,14 +131,11 @@ export function useTexture<Url extends string[] | string | Record<string, string
   const renderer = useThree((state) => state.internal.actualRenderer)
   const store = useStore()
 
-  // Subscribe to texture cache changes (for reactivity when cache updates)
-  const textureCache = useThree((state) => state.textures)
-
   // Normalize options - support both legacy callback and options object
   const options: UseTextureOptions<Url> =
     typeof optionsOrOnLoad === 'function' ? { onLoad: optionsOrOnLoad } : (optionsOrOnLoad ?? {})
 
-  const { onLoad, cache = false } = options
+  const { onLoad, cache = true } = options
 
   // Use ref for onLoad to avoid re-running effect when callback reference changes
   const onLoadRef = useRef(onLoad)
@@ -123,32 +144,66 @@ export function useTexture<Url extends string[] | string | Record<string, string
   // Track which input we've already called onLoad for (prevents duplicate calls on re-render)
   const onLoadCalledForRef = useRef<string | null>(null)
 
-  //* Check our cache first when cache is enabled --
-  // If all requested textures are in our cache, use those (preserves modifications)
-  const urls = useMemo(() => getUrls(input), [input])
+  //* Identity-stable view of `input` --
+  // Callers routinely pass an inline literal — useTexture(['/a.png', '/b.png']) or
+  // useTexture({ map: '/a.png' }) — so `input` is a fresh reference on every render. Everything
+  // below keys off `inputKey` (a value, so it compares by equality) and `stableInput` instead of
+  // the raw reference. Without this the registry effect re-runs every render and its setState
+  // re-renders every store subscriber, which feed each other until React bails out with
+  // "Maximum update depth exceeded" (#3849). Hoisting the argument to a module constant did not
+  // help, because the instability was never only in `input`.
+  const inputKey = useMemo(() => inputSignature(input), [input])
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the value, not the reference
+  const stableInput = useMemo(() => input, [inputKey])
+
+  //* Check the registry once at mount (non-reactive) --
+  // If all requested textures are already registered, use those (preserves modifications). We read
+  // the registry imperatively rather than subscribing, so a mounted useTexture never re-renders on a
+  // registry change — loading texture A can't re-render a component using texture B.
+  const urls = useMemo(() => getUrls(stableInput), [stableInput])
 
   const cachedResult = useMemo(() => {
     if (!cache) return null
-    if (!allUrlsCached(urls, textureCache)) return null
-    return buildFromCache(input, textureCache)
-  }, [cache, urls, textureCache, input])
+    const textures = store.getState().textures
+    if (!allUrlsCached(urls, textures)) return null
+    return buildFromCache(stableInput, textures)
+    // Intentionally not keyed on the registry contents — this is a one-time read at mount (per input).
+  }, [cache, urls, stableInput, store])
 
   //* Load via useLoader (handles suspense) --
   // This always runs to maintain hooks order, but we may not use the result
   const loadedTextures = useLoader(
-    TextureLoader,
-    IsObject(input) ? Object.values(input) : input,
+    getThree().TextureLoader,
+    IsObject(stableInput) ? Object.values(stableInput) : stableInput,
   ) as MappedTextureType<Url>
 
+  // Map textures to keys if object input was provided. Built before onLoad fires so the
+  // callback receives the same shape the hook returns: useLoader hands back a positional array
+  // for the record form, and handing that to a callback typed against the keyed record crashed
+  // at the first `textures.map.wrapT`.
+  const mappedTextures = useMemo(() => {
+    // If we have cached result, it's already in the right format
+    if (cachedResult) return cachedResult
+
+    if (IsObject(stableInput)) {
+      const keyed = {} as Record<string, _Texture>
+      const textureArray = loadedTextures as _Texture[]
+      let i = 0
+      for (const key in stableInput) keyed[key] = textureArray[i++]
+      return keyed as TextureRecord<Url>
+    } else {
+      return loadedTextures
+    }
+  }, [stableInput, loadedTextures, cachedResult]) as MappedTextureType<Url>
+
   // Call onLoad when textures are ready (only on initial load, not cache hits)
-  // Use a stable key based on URLs to prevent duplicate calls on re-render
-  const inputKey = urls.join('\0')
+  // Keyed on inputKey (computed above) so repeat renders don't re-fire the callback
   useLayoutEffect(() => {
     if (cachedResult) return
     if (onLoadCalledForRef.current === inputKey) return
     onLoadCalledForRef.current = inputKey
-    onLoadRef.current?.(loadedTextures)
-  }, [cachedResult, loadedTextures, inputKey])
+    onLoadRef.current?.(mappedTextures)
+  }, [cachedResult, mappedTextures, inputKey])
 
   // https://github.com/mrdoob/three.js/issues/22696
   // Upload the texture to the GPU immediately instead of waiting for the first render
@@ -161,83 +216,97 @@ export function useTexture<Url extends string[] | string | Record<string, string
       let textureArray: _Texture[] = []
       if (Array.isArray(loadedTextures)) {
         textureArray = loadedTextures
-      } else if (loadedTextures instanceof _Texture) {
-        textureArray = [loadedTextures]
+      } else if ((loadedTextures as _Texture).isTexture) {
+        textureArray = [loadedTextures as _Texture]
       } else if (IsObject(loadedTextures)) {
-        textureArray = Object.values(loadedTextures)
+        textureArray = Object.values(loadedTextures) as unknown as _Texture[]
       }
 
       textureArray.forEach((texture) => {
-        if (texture instanceof _Texture) {
+        if (texture?.isTexture) {
           renderer.initTexture(texture)
         }
       })
     }
   }, [renderer, loadedTextures, cachedResult])
 
-  // Map textures to keys if object input was provided
-  const mappedTextures = useMemo(() => {
-    // If we have cached result, it's already in the right format
-    if (cachedResult) return cachedResult
-
-    if (IsObject(input)) {
-      const keyed = {} as Record<string, _Texture>
-      const textureArray = loadedTextures as _Texture[]
-      let i = 0
-      for (const key in input) keyed[key] = textureArray[i++]
-      return keyed as TextureRecord<Url>
-    } else {
-      return loadedTextures
-    }
-  }, [input, loadedTextures, cachedResult])
-
-  //* Add to cache if requested and not already cached --
+  //* Register in the texture cache + refcount while mounted --
+  // Adds missing textures and retains them so useTextures().dispose() is safe; releases on unmount.
+  // Textures stay in the registry after the last release (persist until explicit dispose).
   useEffect(() => {
     if (!cache) return
-    // Don't re-cache if we got the result from cache
-    if (cachedResult) return
 
-    const set = store.setState
+    // URL → texture mapping (works for cache hits and fresh loads; mappedTextures is final either way)
+    const urlTextureMap = urlTextureEntries(stableInput, mappedTextures)
 
-    // Build URL to texture mapping
-    const urlTextureMap: Array<[string, _Texture]> = []
-
-    if (typeof input === 'string') {
-      urlTextureMap.push([input, mappedTextures as _Texture])
-    } else if (Array.isArray(input)) {
-      const textureArray = mappedTextures as _Texture[]
-      input.forEach((url, i) => urlTextureMap.push([url, textureArray[i]]))
-    } else if (IsObject(input)) {
-      const textureRecord = mappedTextures as Record<string, _Texture>
-      for (const key in input) {
-        const url = input[key]
-        urlTextureMap.push([url, textureRecord[key]])
-      }
-    }
-
-    // Add to cache (only if not already present)
-    set((state) => {
-      const newMap = new Map(state.textures)
-      let changed = false
+    // Retain: add missing textures and increment their refcount so useTextures().dispose() is safe.
+    // Only clone `textures` (and so notify registry subscribers) when a texture is actually added —
+    // a refcount-only bump (re-mounting an already-cached consumer) must not churn the registry.
+    store.setState((state) => {
+      const refs = new Map(state._textureRefs)
+      let textures = state.textures
+      let added = false
       for (const [url, texture] of urlTextureMap) {
-        if (!newMap.has(url)) {
-          newMap.set(url, texture)
-          changed = true
+        if (!textures.has(url)) {
+          if (!added) {
+            textures = new Map(textures)
+            added = true
+          }
+          textures.set(url, texture)
         }
+        refs.set(url, (refs.get(url) ?? 0) + 1)
       }
-      return changed ? { textures: newMap } : state
+      return added ? { textures, _textureRefs: refs } : { _textureRefs: refs }
     })
+    // Registered now: the render-phase staging below is no longer needed
+    unstageTextures(
+      store,
+      urlTextureMap.map(([url]) => url),
+    )
 
-    // No cleanup on unmount - textures persist until explicit dispose
-  }, [cache, input, mappedTextures, store, cachedResult])
+    // Release on unmount: decrement refcount. Textures persist until explicit dispose.
+    return () =>
+      store.setState((state) => {
+        const refs = new Map(state._textureRefs)
+        for (const [url] of urlTextureMap) {
+          const next = (refs.get(url) ?? 0) - 1
+          if (next <= 0) refs.delete(url)
+          else refs.set(url, next)
+        }
+        return { _textureRefs: refs }
+      })
+  }, [cache, stableInput, mappedTextures, store])
+
+  //* Visible to later hooks in this render --
+  // Registration above is a store write, so it waits for the layout effect. Staging makes a fresh
+  // load visible to a hook later in this same render that reads the registry (a TSL creator's
+  // `textures.get(url)`) without writing the store; see ../utils/textureStaging.
+  if (cache && !cachedResult) stageTextures(store, urlTextureEntries(stableInput, mappedTextures))
 
   return mappedTextures
 }
 
+/** Pair every requested URL with the texture loaded for it, whatever the input shape. */
+function urlTextureEntries(
+  input: string | string[] | Record<string, string>,
+  textures: unknown,
+): Array<[string, _Texture]> {
+  if (typeof input === 'string') return [[input, textures as _Texture]]
+  if (Array.isArray(input)) return input.map((url, i) => [url, (textures as _Texture[])[i]])
+  const record = textures as Record<string, _Texture>
+  return Object.keys(input).map((key) => [input[key], record[key]])
+}
+
 //* Static Methods ==============================
 
-useTexture.preload = (url: string | string[]) => useLoader.preload(TextureLoader, url)
-useTexture.clear = (input: string | string[]) => useLoader.clear(TextureLoader, input)
+// The loader class arrives with the first root's renderer. A preload issued before any Canvas
+// exists starts as soon as one does; there is nothing to clear before then.
+useTexture.preload = (url: string | string[]) => {
+  whenThree().then((three) => useLoader.preload(three.TextureLoader, url))
+}
+useTexture.clear = (input: string | string[]) => {
+  if (hasThree()) useLoader.clear(getThree().TextureLoader, input)
+}
 
 //* Component Wrapper ==============================
 

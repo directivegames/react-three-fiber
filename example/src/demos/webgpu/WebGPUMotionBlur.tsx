@@ -14,33 +14,33 @@
  */
 
 import { useRef, useEffect, useState, useMemo } from 'react'
-import { Canvas, useFrame, useTexture, useThree } from '@react-three/fiber/webgpu'
-import { useUniforms, useRenderPipeline } from '@react-three/fiber/webgpu'
+// The /webgpu entry types `state.renderer` as a WebGPURenderer, which this demo needs for `renderer.backend`
+import { Canvas, useFrame, useTexture, useThree } from '@react-three/fiber'
 import { useControls } from 'leva'
 import { OrbitControls } from '@react-three/drei'
 import * as THREE from 'three/webgpu'
 import { mrt, output, velocity, screenUV, texture, uv } from 'three/tsl'
 import { motionBlur } from 'three/addons/tsl/display/MotionBlur.js'
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { useUniforms, useRenderPipeline } from '@react-three/tsl'
 
 //* Render Pipeline Manager ==============================
 // This component sets up and manages the render pipeline
 // Uses useRenderPipeline hook - no manual useFrame needed!
 
 function RenderPipelineManager() {
-  // Get the blur amount uniform from shared state (registered in Experience)
-  const { blurAmount } = useUniforms()
-
   useRenderPipeline(
-    // mainCB - receives full RootState, set outputNode explicitly
+    // mainCB - receives the creator state, set outputNode explicitly. `uniforms.blurAmount` is
+    // registered by Experience; reading it here (not in a closure) tracks it, so a replaced
+    // uniform rebuilds the graph and a new .value needs no rebuild.
     ({ renderPipeline, passes, uniforms }) => {
+      const { blurAmount } = uniforms
+
       // Get the rendered textures
       const beauty = passes.scenePass.getTextureNode()
       const vel = passes.scenePass.getTextureNode('velocity')
 
-      // Use blurAmount from uniforms (or from outer scope via closure)
-      const blurNode = uniforms.blurAmount ?? blurAmount
-      const mBlur = motionBlur(beauty, vel.mul(blurNode))
+      const mBlur = motionBlur(beauty, vel.mul(blurAmount))
 
       // Add vignette effect for polish
       // Creates a darkening at the edges of the screen
@@ -78,9 +78,10 @@ function AnimatedCharacter({ speed = 1 }: { speed?: number }) {
   const group = useRef<THREE.Group>(null!)
   const [model, setModel] = useState<THREE.Group | null>(cachedModel?.scene ?? null)
   const mixerRef = useRef<THREE.AnimationMixer | null>(cachedModel?.mixer ?? null)
-  const renderer = useThree((s) => s.gl) as unknown as THREE.WebGPURenderer
+  const renderer = useThree((s) => s.renderer)
 
-  // Load GLTF model directly (not using drei's useGLTF for WebGPU compatibility)
+  // Load GLTF model directly (not using drei's useGLTF for WebGPU compatibility). Loading in an
+  // effect rather than useLoader lets the model survive hot updates through cachedModel.
   useEffect(() => {
     // If we have a cached model from HMR, use it
     if (cachedModel) {
@@ -130,7 +131,8 @@ function AnimatedCharacter({ speed = 1 }: { speed?: number }) {
         cachedModel.scene.traverse((child) => {
           const mesh = child as THREE.SkinnedMesh
           if (mesh.isSkinnedMesh && mesh.skeleton) {
-            const skeleton = mesh.skeleton as any // WebGPU adds previousBoneMatrices
+            // previousBoneMatrices is added by WebGPU's SkinningNode and is not in three's Skeleton types
+            const skeleton = mesh.skeleton as any
             // Ensure previousBoneMatrices exists and is populated
             if (skeleton.boneMatrices) {
               if (!skeleton.previousBoneMatrices) {
@@ -144,7 +146,8 @@ function AnimatedCharacter({ speed = 1 }: { speed?: number }) {
 
       // Clear renderer's node cache to force SkinningNode recreation
       try {
-        const backend = (renderer as any).backend
+        // three types `backend` as the abstract Backend, which does not declare the node cache
+        const backend = renderer.backend as any
         if (backend?.nodes?.cache) backend.nodes.cache.clear()
       } catch {
         // Ignore cache clear errors
@@ -202,11 +205,7 @@ interface AnimatedTorusProps {
 function AnimatedTorus({ position, direction = 1 }: AnimatedTorusProps) {
   const meshRef = useRef<THREE.Mesh>(null!)
   const map = useTexture('/images/uv_grid_opengl.jpg')
-
-  // Configure texture properties
-  useEffect(() => {
-    map.colorSpace = THREE.SRGBColorSpace
-  }, [map])
+  map.colorSpace = THREE.SRGBColorSpace
 
   // Animate rotation
   useFrame((_, delta) => {
@@ -227,18 +226,12 @@ function AnimatedTorus({ position, direction = 1 }: AnimatedTorusProps) {
 
 function ScalingTorus({ position }: { position: [number, number, number] }) {
   const meshRef = useRef<THREE.Mesh>(null!)
-  const clockRef = useRef(new THREE.Clock())
   const map = useTexture('/images/uv_grid_opengl.jpg')
-
-  // Configure texture properties
-  useEffect(() => {
-    map.colorSpace = THREE.SRGBColorSpace
-  }, [map])
+  map.colorSpace = THREE.SRGBColorSpace
 
   // Animate scale pulsing
-  useFrame(() => {
+  useFrame(({ elapsed }) => {
     if (!meshRef.current) return
-    const elapsed = clockRef.current.getElapsedTime()
     const scale = 1 + Math.sin(elapsed * 10) * 0.2
     meshRef.current.scale.setScalar(scale)
   })
@@ -330,9 +323,10 @@ function Experience() {
     blurAmount: { value: 1.0, min: 0, max: 3, step: 0.1 },
     speed: { value: 1.0, min: 0, max: 2, step: 0.1 },
     autoRotate: { value: true },
+    effect: { value: true },
   })
 
-  // Register uniforms with R3F state (makes them available to RenderPipelineManager)
+  // Register the blur uniform; RenderPipelineManager reads it from its callback state
   useUniforms({ blurAmount: levaControls.blurAmount })
 
   return (
@@ -348,8 +342,8 @@ function Experience() {
       <AnimatedTorus position={[3.5, 1.5, -4]} direction={1} />
       <ScalingTorus position={[-3.5, 1.5, -4]} />
 
-      {/* Render pipeline manager - takes over rendering */}
-      <RenderPipelineManager />
+      {/* Render pipeline manager - takes over rendering while mounted; unmounting it frees the pipeline */}
+      {levaControls.effect && <RenderPipelineManager />}
 
       {/* Camera controls with auto-rotate */}
       <OrbitControls
@@ -370,7 +364,7 @@ function Experience() {
 
 export default function WebGPUMotionBlur() {
   return (
-    <Canvas renderer camera={{ fov: 50, position: [0, 1.5, 4.5], near: 0.25, far: 30 }} shadows>
+    <Canvas renderer={{ shadows: true }} camera={{ fov: 50, position: [0, 1.5, 4.5], near: 0.25, far: 30 }}>
       <fog attach="fog" args={['#0487e2', 7, 25]} />
       <Experience />
     </Canvas>

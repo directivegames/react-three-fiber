@@ -37,7 +37,16 @@ Yes. It merely expresses Threejs in JSX, `<mesh />` dynamically turns into `new 
 
 #### Does it support WebGPU?
 
-Yes. With minor changes in v9 and significant work in v10 WebGPU support is first class. We support all ThreeJS WebGPU features/Nodes and expand it with our own hooks and utilities.
+Yes. In v10 it is the default: `<Canvas>` from `@react-three/fiber` renders with three's `WebGPURenderer`, which falls back to a WebGL2 backend where the browser has no WebGPU, and the hooks are typed for it. Node materials and TSL work out of the box, with our own hooks in [`@react-three/tsl`](https://github.com/pmndrs/react-three-fiber/tree/v10/packages/tsl). Scenes that need `WebGLRenderer` (GLSL `ShaderMaterial`s, `onBeforeCompile`, `postprocessing`) import from `@react-three/fiber/legacy`.
+
+#### Upgrading to v10?
+
+v10 is in alpha (`npm install @react-three/fiber@alpha`). Read the [migration guide](https://r3f.docs.pmnd.rs/next/migration/v10) and the [list of breaking changes](https://r3f.docs.pmnd.rs/next/migration/breaking-changes). The short version:
+
+- `@react-three/fiber` renders with WebGPU; WebGL is `@react-three/fiber/legacy`, chosen by the import.
+- `useThree`, `useFrame` and `onCreated` are typed for the import's renderer, so `state.renderer.compute(...)` needs no cast. Libraries that run on both renderers type against `@react-three/fiber/extension`.
+- `state.gl` is `state.renderer` (deprecated), `state.clock` is gone (`state.elapsed`, `state.delta`), and `shadows` and the color props moved into `renderer={{ ... }}` / `gl={{ ... }}`.
+- The TSL hooks live in `@react-three/tsl`; the `physics` frame phase runs on a fixed timestep.
 
 ### What does it look like?
 
@@ -136,7 +145,6 @@ createRoot(document.getElementById('root') as HTMLElement).render(
 )
 ```
 
-TODO: Move this
 Live demo: https://codesandbox.io/s/icy-tree-brnsm?file=/src/App.tsx
 
 </details>
@@ -144,7 +152,7 @@ Live demo: https://codesandbox.io/s/icy-tree-brnsm?file=/src/App.tsx
 <details>
   <summary>Show React Native example</summary>
 
-This example relies on react 18 and uses `expo-cli`, but you can create a bare project with their template or with the `react-native` CLI.
+This example uses `expo-cli`, but you can create a bare project with their template or with the `react-native` CLI.
 
 ```bash
 # Install expo-cli, this will create our app
@@ -153,7 +161,7 @@ npm install expo-cli -g
 expo init my-app
 cd my-app
 # Install dependencies
-npm install three @react-three/fiber@beta react@rc
+npm install three @react-three/native
 # Start
 expo start
 ```
@@ -172,7 +180,7 @@ module.exports = {
 
 ```tsx
 import React, { useRef, useState } from 'react'
-import { Canvas, useFrame } from '@react-three/fiber/native'
+import { Canvas, useFrame } from '@react-three/native'
 function Box(props) {
   const mesh = useRef(null)
   const [hovered, setHover] = useState(false)
@@ -216,7 +224,7 @@ Visit [docs.pmnd.rs](https://docs.pmnd.rs/react-three-fiber) | [Awesome React Th
 
 You need to be versed in both React and Threejs before rushing into this. If you are unsure about React consult the official [React docs](https://react.dev/learn), especially [the section about hooks](https://react.dev/reference/react). As for Threejs, make sure you at least glance over the following links:
 
-1. Make sure you have a [basic grasp of Threejs](https://threejs.org/docs/index.html#manual/en/introduction/Creating-a-scene). Keep that site open.
+1. Make sure you have a [basic grasp of Threejs](https://threejs.org/manual/#en/creating-a-scene). Keep that site open.
 2. When you know what a scene is, a camera, mesh, geometry, material, fork the [demo above](https://github.com/pmndrs/react-three-fiber#what-does-it-look-like).
 3. [Look up](https://threejs.org/docs/index.html#api/en/objects/Mesh) the JSX elements that you see (mesh, ambientLight, etc), _all_ threejs exports are native to three-fiber.
 4. Try changing some values, scroll through our [API](https://docs.pmnd.rs/react-three-fiber) to see what the various settings and hooks do.

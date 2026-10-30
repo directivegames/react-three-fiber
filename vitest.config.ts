@@ -1,4 +1,4 @@
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import * as path from 'node:path'
 
 export default defineConfig({
@@ -6,9 +6,10 @@ export default defineConfig({
     dedupe: ['react', 'react-dom', 'three', 'use-sync-external-store'],
     alias: {
       '@react-three/fiber/legacy': path.resolve(__dirname, './packages/fiber/src/legacy.tsx'),
+      '@react-three/tsl': path.resolve(__dirname, './packages/tsl/src/index.ts'),
+      '@react-three/fiber/extension': path.resolve(__dirname, './packages/fiber/src/extension.tsx'),
       '@react-three/fiber/webgpu': path.resolve(__dirname, './packages/fiber/src/webgpu/index.tsx'),
       '@react-three/fiber': path.resolve(__dirname, './packages/fiber/src/index.tsx'),
-      '#three': path.resolve(__dirname, './packages/fiber/src/three'),
       '#types': path.resolve(__dirname, './packages/fiber/src/types.ts'),
       '#utils': path.resolve(__dirname, './packages/fiber/src/core/utils.ts'),
       'three/addons': path.resolve(__dirname, './node_modules/three/examples/jsm'),
@@ -22,10 +23,33 @@ export default defineConfig({
     environment: 'jsdom',
     setupFiles: ['./packages/fiber/tests/setupTests.ts'],
     include: ['**/*.{test,spec}.{js,mjs,cjs,ts,mts,cts,jsx,tsx}'],
+    // Tier 3 needs a real WebGPU device and runs in its own project: `pnpm test:gpu` (vitest.gpu.config.ts)
+    exclude: [...configDefaults.exclude, '**/tests/gpu/**'],
     coverage: {
       provider: 'v8',
-      reporter: ['text', 'json', 'html'],
+      reporter: ['text', 'text-summary', 'json', 'html'],
       exclude: ['node_modules/', 'packages/fiber/dist', 'packages/fiber/src/index', 'packages/test-renderer/dist'],
+      /**
+       * A ratchet, not a target. Each value sits just under what the suite currently achieves, so
+       * the build fails if coverage *drops* — it does not assert that coverage is good.
+       *
+       * Take the figures from the lower of the CI React legs (`19.0.0` reads slightly below `latest`)
+       * and floor them with ~0.5–1% headroom so neither leg flakes.
+       *
+       * Raise these as coverage improves; never lower one to make a build pass. These are
+       * global totals; the ~80% lines goal for `src/core` is met at the directory level, but the
+       * weakest files there are `Environment.tsx`, `visibility.ts` and `useEnvironment.tsx`, all of
+       * which ship stable and need real tests.
+       *
+       * Statements/branches read low because v8 counts every bundled three.js expression that the
+       * suite touches; `lines` is the meaningful figure for R3F's own code.
+       */
+      thresholds: {
+        lines: 85,
+        functions: 54,
+        statements: 44,
+        branches: 31,
+      },
     },
     testTimeout: 30000,
   },

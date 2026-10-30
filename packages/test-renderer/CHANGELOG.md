@@ -1,10 +1,91 @@
 # @react-three/test-renderer
 
+## 10.0.0-alpha.6
+
+### Major Changes
+
+- The default entry mocks WebGPU and creates WebGPU canvases, since `@react-three/fiber` now renders
+  with `WebGPURenderer`. Test WebGL scenes with `@react-three/test-renderer/legacy` (#4013).
+- `@react-three/test-renderer/webgpu` is deprecated with `@react-three/fiber/webgpu`, and removed in
+  the first beta. Use the default entry, which mocks WebGPU (#4013).
+- `@react-three/test-renderer/webgpu` no longer re-exports the TSL resource hooks (`useUniforms`,
+  `useUniform`, `useNodes`, `useLocalNodes`, `useBuffers`, `useGPUStorage`, `useRenderPipeline`,
+  `rebuildAll*`) or the removed standalone TSL utilities. Import the hooks from
+  `@react-three/tsl`.
+
+### Patch Changes
+
+- The WebGL2 context mock's `getSupportedExtensions()` returns the mocked extensions, which
+  `WebGPURenderer`'s WebGL2 fallback backend reads.
+- Tracks `@react-three/fiber@10.0.0-alpha.6`. See [Fiber's changelog](../fiber/CHANGELOG.md) and the
+  [full Alpha 6 notes](../../CHANGELOG-ALPHA.md#1000-alpha6).
+
+## 10.0.0-alpha.5
+
+### Patch Changes
+
+- Tracks `@react-three/fiber@10.0.0-alpha.5`. There are no package-specific runtime changes in this
+  release. See [Fiber's changelog](../fiber/CHANGELOG.md) and the
+  [full Alpha 5 notes](../../CHANGELOG-ALPHA.md#1000-alpha5).
+
+## 10.0.0-alpha.4
+
+### Patch Changes
+
+- Tracks `@react-three/fiber@10.0.0-alpha.4`. There are no package-specific runtime changes in this
+  release. See [Fiber's changelog](../fiber/CHANGELOG.md) and the
+  [full Alpha 4 notes](../../CHANGELOG-ALPHA.md#1000-alpha4).
+
+## 10.0.0-alpha.3
+
+### Major Changes
+
+- **This package now has a real build.** It previously had no build script and no `dist`, while
+  `main`, `module` and `types` all pointed into `dist/` — it would have published broken. It now
+  builds all three entries (`.`, `/legacy`, `/webgpu`) with a config mirroring `@react-three/fiber`.
+
+  If you were installing alpha.2 or earlier and hitting unresolvable imports, this is why.
+
+### Minor Changes
+
+- `@react-three/test-renderer/webgpu` no longer reaches into fiber's source, which had been leaking
+  the internal `#three` alias into the bundle as unresolvable specifiers and duplicating hooks.
+  Bundle size dropped from ~67 kB to ~44 kB as a result.
+- Export-parity tests added against `@react-three/fiber`.
+
+### Patch Changes
+
+- Tracks `@react-three/fiber@10.0.0-alpha.3`. See
+  [that package's changelog](../fiber/CHANGELOG.md) for the authoritative list, and
+  [`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha3) for full detail. The headline is a
+  **breaking peer bump: `three` now requires `>=0.185.0`**, and `act` is no longer re-exported.
+
 ## 10.0.0-alpha.2
 
 ### Major Changes
 
-- 1692803: Features Canvas Size Control - Added width and height props to Canvas for explicit resolution control - Enhanced setSize() API with square shorthand and reset capability - Ownership model: imperative setSize(w, h) takes control until setSize() resets ScopedStore for Type-Safe Uniform/Node Access - New createScopedStore<T>() wrapper for TypeScript-friendly access to uniforms/nodes - Eliminates manual casting in creator functions - New exports: ScopedStoreType<T>, CreatorState HMR Support for TSL Hooks - Automatic Hot Module Replacement for WebGPU TSL hooks - Canvas detects Vite/webpack HMR events and rebuilds nodes/uniforms - New hmr prop on Canvas, rebuildNodes(), rebuildUniforms() utils Bug Fixes - Fixed useNodes() and useUniforms() reader modes not updating when store changes - Fixed usePostProcessing callbacks not re-running after HMR - Fixed absolute Windows paths in bundled type declarations (FiberRoot now defined locally) - Fixed eslint-plugin codegen not awaiting prettier format Maintenance - Migrated to ESLint 9 flat config - Updated Vite to v7, Prettier to v3, Husky to v9, lint-staged to v16 - Converted verify-bundles.js to ES modules ---
+- 1692803: Aggregate alpha.2 changeset, applied across all four published packages. The entries
+  below are `@react-three/fiber` changes — see that package's changelog for the authoritative list.
+
+  **Features**
+  - Canvas Size Control: `width`/`height` props on Canvas for explicit resolution control;
+    `setSize()` gains a square shorthand and reset; imperative `setSize(w, h)` takes ownership
+    until `setSize()` resets it
+  - ScopedStore for type-safe uniform/node access: `createScopedStore<T>()` removes manual casting
+    in creator functions; new `ScopedStoreType<T>` and `CreatorState` exports
+  - HMR support for TSL hooks: Canvas detects Vite/webpack HMR and rebuilds nodes/uniforms; new
+    `hmr` prop, `rebuildNodes()` and `rebuildUniforms()` utils
+
+  **Bug Fixes**
+  - `useNodes()` / `useUniforms()` reader modes not updating when the store changes
+  - `usePostProcessing` callbacks not re-running after HMR
+  - Absolute Windows paths in bundled type declarations (`FiberRoot` now defined locally)
+  - eslint-plugin codegen not awaiting prettier format
+
+  **Maintenance**
+  - Migrated to ESLint 9 flat config
+  - Updated Vite to v7, Prettier to v3, Husky to v9, lint-staged to v16
+  - Converted `verify-bundles.js` to ES modules
 
 ## 10.0.0-alpha.1
 

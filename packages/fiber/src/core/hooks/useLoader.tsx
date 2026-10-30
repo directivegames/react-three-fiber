@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { suspend, preload, clear } from 'suspend-react'
 import { buildGraph, is, isObject3D } from '../utils'
 
@@ -76,18 +77,62 @@ export function useLoader<I extends InputLike, L extends LoaderLike | Constructo
   input: I,
   extensions?: Extensions<L>,
   onProgress?: (event: ProgressEvent<EventTarget>) => void,
+  cacheKey?: InputLike,
 ) {
-  // Use suspense to load async assets
-  const keys = (Array.isArray(input) ? input : [input]) as string[]
+  // What to load
+  const inputs = (Array.isArray(input) ? input : [input]) as string[]
+  // What to cache under. Defaults to the input URLs, but can be overridden so assets fetched
+  // from URLs that change per request (signed/auth URLs) still reuse the same cache entry.
+  const cacheKeys = (Array.isArray(cacheKey ?? input) ? (cacheKey ?? input) : [cacheKey ?? input]) as string[]
 
   // Create the loading function once to ensure consistent function reference across suspend calls
   const fn = loadingFn(extensions, onProgress)
 
-  // Call suspend individually for each key to match preload cache structure
-  const results = keys.map((key) => suspend(fn, [loader, key], { equal: is.equ }))
+  // Call suspend individually for each key to match preload cache structure.
+  // Suspend caches on `key`, but the closure always loads the matching `input`.
+  const results = cacheKeys.map((key, index) =>
+    suspend(() => fn(loader, inputs[index]), [loader, key], { equal: is.equ }),
+  )
+
+  // Keep the array's identity stable while its contents are unchanged.
+  //
+  // `.map()` builds a fresh array every render, and callers routinely use the result as an effect
+  // dependency. Any such effect that also writes to the store becomes an infinite render loop:
+  // effect -> setState -> re-render -> new array identity -> effect. That is #3849, which
+  // useTexture hit through its registry effect.
+  //
+  // Shallow-compared rather than keyed on the cache keys, because `useLoader.clear()` can hand
+  // back new objects for the *same* keys and that invalidation still has to propagate. Comparing
+  // the resolved values means a genuine change always yields a new identity, and an incidental
+  // re-render never does.
+  //
+  // Only the wrapper array is stabilised. The elements come from the suspend cache, which returns
+  // one object per key process-wide, so two components loading the same URLs still share the very
+  // same loaded assets — they just hold different arrays around them.
+  //
+  // A useMemo cannot express this: its dep array would have to be `results` itself, and React
+  // throws when a dep array changes length — which happens as soon as the URL count does.
+  //
+  // On writing a ref during render, which React discourages: this is a content-keyed cache, not
+  // state. `previous` is only ever returned when it is element-wise equal to the `results` just
+  // computed, so the value handed back is correct no matter which render populated the ref. An
+  // abandoned or interrupted concurrent render can therefore only leave behind an array that the
+  // next render replaces — it cannot produce a stale or wrong result — and StrictMode's double
+  // render settles on the same array both times. Nothing outside this call can observe the write.
+  //
+  // NOTE: this is the first hook in useLoader. `suspend()` is a cache-and-throw, not a hook, so
+  // until now useLoader could be called conditionally despite its name. That was always a
+  // rules-of-hooks violation and lint has always flagged it; it merely happened to work.
+  const stableRef = useRef<unknown[] | null>(null)
+  const previous = stableRef.current
+  const stable =
+    previous !== null && previous.length === results.length && previous.every((value, i) => value === results[i])
+      ? previous
+      : results
+  stableRef.current = stable
 
   // Return the object(s)
-  return (Array.isArray(input) ? results : results[0]) as I extends any[] ? LoaderResult<L>[] : LoaderResult<L>
+  return (Array.isArray(input) ? stable : stable[0]) as I extends any[] ? LoaderResult<L>[] : LoaderResult<L>
 }
 
 /**
@@ -98,10 +143,14 @@ useLoader.preload = function <I extends InputLike, L extends LoaderLike | Constr
   input: I,
   extensions?: Extensions<L>,
   onProgress?: (event: ProgressEvent<EventTarget>) => void,
+  cacheKey?: InputLike,
 ): void {
-  const keys = (Array.isArray(input) ? input : [input]) as string[]
+  const inputs = (Array.isArray(input) ? input : [input]) as string[]
+  const cacheKeys = (Array.isArray(cacheKey ?? input) ? (cacheKey ?? input) : [cacheKey ?? input]) as string[]
   // Preload each key individually so cache keys match useLoader calls
-  keys.forEach((key) => preload(loadingFn(extensions, onProgress), [loader, key]))
+  cacheKeys.forEach((key, index) =>
+    preload(() => loadingFn(extensions, onProgress)(loader, inputs[index]), [loader, key]),
+  )
 }
 
 /**
@@ -110,10 +159,11 @@ useLoader.preload = function <I extends InputLike, L extends LoaderLike | Constr
 useLoader.clear = function <I extends InputLike, L extends LoaderLike | ConstructorRepresentation<LoaderLike>>(
   loader: L,
   input: I,
+  cacheKey?: InputLike,
 ): void {
-  const keys = (Array.isArray(input) ? input : [input]) as string[]
-  // Clear each key individually to match how they were cached
-  keys.forEach((key) => clear([loader, key]))
+  const cacheKeys = (Array.isArray(cacheKey ?? input) ? (cacheKey ?? input) : [cacheKey ?? input]) as string[]
+  // Clear each key individually to match how they were cached (custom cache key when provided)
+  cacheKeys.forEach((key) => clear([loader, key]))
 }
 
 /**

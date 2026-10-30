@@ -1,4 +1,5 @@
-import * as THREE from '#three'
+import type * as THREE from 'three'
+import { getThree } from './three'
 import { getRootState } from './utils'
 import { unregisterVisibility } from './visibility'
 
@@ -57,8 +58,91 @@ function releaseInternalPointerCapture(internal: RootState['internal'], obj: THR
   const captureData = pointerState.captured.get(obj)
   if (captureData) {
     pointerState.captured.delete(obj)
-    captureData.target.releasePointerCapture(pointerId)
+
+    // Our own bookkeeping is done; the DOM release is best-effort on top of it.
+    //
+    // This runs from `removeInteractivity` during unmount, and the browser may well have released
+    // the capture already -- on pointerup, on pointercancel, or when the element was detached. In
+    // that case `releasePointerCapture` throws `NotFoundError` for an id it no longer considers
+    // captured. Letting that escape means a component that was mid-drag when it unmounted takes
+    // the whole teardown down with it.
+    //
+    // Unlike the swallowed errors removed elsewhere in v10, there is nothing here worth surfacing:
+    // the release we wanted has happened either way, and warning on every such unmount would be
+    // noise for a non-event.
+    try {
+      captureData.target.releasePointerCapture?.(pointerId)
+    } catch {
+      // Already released, or the target is gone. Either way the capture is not held.
+    }
   }
+}
+
+/**
+ * Moves every trace of interactivity from one object to its replacement, for reconstruction.
+ *
+ * When `args` or a `primitive`'s `object` changes, R3F builds a new three object and keeps the same
+ * instance. Removing the old object from the interaction state and registering the new one from
+ * scratch makes events *work* again (#3778), but it forgets what was in flight: a pointer resting on
+ * the object fires a second `onPointerEnter` without ever having left, and an active pointer capture
+ * is dropped mid-drag. Rewriting the references instead keeps the interaction continuous across a
+ * swap the user never asked to see (#3744).
+ *
+ * Captures are re-keyed rather than released, so the DOM-level capture on `captureData.target` is
+ * left alone — releasing and re-acquiring it is precisely the glitch being avoided.
+ *
+ * Visibility handlers are deliberately not transferred: that registry is keyed by `object.uuid`, so
+ * the replacement re-registers itself through `applyProps`. The old entry is dropped here so it
+ * cannot outlive the object it described.
+ */
+export function swapInteractivity(store: RootStore, object: THREE.Object3D, newObject: THREE.Object3D) {
+  const { internal } = store.getState()
+
+  // Replaced in place: an object's position in the interaction list feeds hit ordering, so the
+  // replacement should inherit it rather than being appended at the end.
+  for (let i = 0; i < internal.interaction.length; i++) {
+    if (internal.interaction[i] === object) internal.interaction[i] = newObject
+  }
+
+  for (const pointerState of internal.pointerMap.values()) {
+    for (let i = 0; i < pointerState.initialHits.length; i++) {
+      if (pointerState.initialHits[i] === object) pointerState.initialHits[i] = newObject
+    }
+
+    // Hover entries are keyed by uuid, so a swap needs a new key as well as new references —
+    // rewriting the value alone would strand the entry under the old object's id.
+    pointerState.hovered.forEach((value, key) => {
+      if (value.eventObject === object || value.object === object) {
+        pointerState.hovered.delete(key)
+        const next = {
+          ...value,
+          eventObject: value.eventObject === object ? newObject : value.eventObject,
+          object: value.object === object ? newObject : value.object,
+        }
+        pointerState.hovered.set(makeId(next), next)
+      }
+    })
+
+    // Captures need more than a re-key. The stored `intersection` is replayed into the hit list on
+    // every subsequent event, and it holds its own `object`/`eventObject` references — leave those
+    // pointing at the discarded object and the replay resolves to a corpse whose `__r3f` link has
+    // already been severed, so the drag goes silent even though the capture "survived".
+    for (const [key, captureData] of Array.from(pointerState.captured)) {
+      const { intersection } = captureData
+      if (key !== object && intersection.object !== object && intersection.eventObject !== object) continue
+      if (key === object) pointerState.captured.delete(key)
+      pointerState.captured.set(key === object ? newObject : key, {
+        ...captureData,
+        intersection: {
+          ...intersection,
+          object: intersection.object === object ? newObject : intersection.object,
+          eventObject: intersection.eventObject === object ? newObject : intersection.eventObject,
+        },
+      })
+    }
+  }
+
+  unregisterVisibility(store, object)
 }
 
 export function removeInteractivity(store: RootStore, object: THREE.Object3D) {
@@ -145,10 +229,23 @@ export function createEvents(store: RootStore) {
         if (state.raycaster.camera === undefined) state.raycaster.camera = null!
       }
 
+      if (!state.raycaster.camera) return []
+
+      // Bring world matrices up to date before intersecting. three's raycaster reads `matrixWorld`
+      // and never refreshes it -- it assumes the render loop already has. That assumption breaks for
+      // any event arriving between a React commit and the next rendered frame: the object has its
+      // new `position`, its `matrixWorld` still says otherwise, and the hit is computed against
+      // where it used to be. Two objects that have not been rendered yet both report the origin, so
+      // their distances tie and "nearest first" silently degrades into scene order.
+      //
+      // `updateWorldMatrix(true, true)` walks ancestors first, then descendants, so a nested object
+      // is correct even when its parent is what moved. Cheap in the common case -- three skips the
+      // maths for anything not flagged dirty.
+      obj.updateWorldMatrix(true, true)
+
       // Intersect object by object
-      return state.raycaster.camera ? state.raycaster.intersectObject(obj, true) : []
+      return state.raycaster.intersectObject(obj, true)
     }
-    //console.log('raw eventObjects', eventsObjects)
 
     // Collect events
     let hits: THREE.Intersection<THREE.Object3D>[] = eventsObjects
@@ -187,21 +284,6 @@ export function createEvents(store: RootStore) {
         duplicates.add(id)
         return true
       })
-
-    // DEBUG: Log hit priorities
-    /*
-    if (hits.length > 1) {
-      console.log(
-        '%c[Events Debug] Sorted hits:',
-        'color: cyan',
-        hits.map((h) => ({
-          name: h.object.name || h.object.type,
-          priority: getRootState(h.object)?.events?.priority ?? 1,
-          distance: h.distance.toFixed(3),
-        })),
-      )
-    }
-      */
 
     // https://github.com/mrdoob/three.js/issues/16031
     // Allow custom userland intersect sort order, this likely only makes sense on the root filter
@@ -247,7 +329,7 @@ export function createEvents(store: RootStore) {
 
         if (state) {
           const { raycaster, pointer, camera, internal } = state
-          const unprojectedPoint = new THREE.Vector3(pointer.x, pointer.y, 0).unproject(camera)
+          const unprojectedPoint = new (getThree().Vector3)(pointer.x, pointer.y, 0).unproject(camera)
 
           const hasPointerCapture = (id: number) => {
             const pointerState = internal.pointerMap.get(id)
@@ -671,7 +753,7 @@ const DOM_EVENTS = {
 } as const
 
 /** Default R3F event manager for web */
-export function createPointerEvents(store: RootStore): EventManager<HTMLElement> {
+export function createPointerEvents(store: RootStore): EventManager<Element> {
   const { handlePointer, flushDeferredPointers, processDeferredPointer } = createEvents(store)
 
   // Counter for XR pointer IDs
@@ -735,7 +817,7 @@ export function createPointerEvents(store: RootStore): EventManager<HTMLElement>
       }
     },
 
-    connect: (target: HTMLElement) => {
+    connect: (target: Element) => {
       if (!target) return
       const { set, events } = store.getState()
       events.disconnect?.()
@@ -763,6 +845,7 @@ export function createPointerEvents(store: RootStore): EventManager<HTMLElement>
       }
     },
 
+    // PREVIEW (A8): the XR pointer registration API may change before stable.
     registerPointer: (config: XRPointerConfig) => {
       const pointerId = nextXRPointerId++
       xrPointers.set(pointerId, config)

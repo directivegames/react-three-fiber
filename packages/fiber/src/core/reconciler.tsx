@@ -1,4 +1,4 @@
-import type { Scene } from '#three'
+import type { Scene } from 'three'
 import packageData from '../../package.json'
 
 import * as React from 'react'
@@ -7,8 +7,17 @@ import {
   ContinuousEventPriority,
   DiscreteEventPriority,
   DefaultEventPriority,
+  IdleEventPriority,
 } from '../../react-reconciler/constants.js'
-import { unstable_IdlePriority as idlePriority, unstable_scheduleCallback as scheduleCallback } from 'scheduler'
+import {
+  unstable_IdlePriority as idlePriority,
+  unstable_ImmediatePriority as immediatePriority,
+  unstable_UserBlockingPriority as userBlockingPriority,
+  unstable_NormalPriority as normalPriority,
+  unstable_LowPriority as lowPriority,
+  unstable_getCurrentPriorityLevel as getCurrentPriorityLevel,
+  unstable_scheduleCallback as scheduleCallback,
+} from 'scheduler'
 import {
   diffProps,
   applyProps,
@@ -18,14 +27,18 @@ import {
   prepare,
   isObject3D,
   findInitialRoot,
+  getInstanceProps,
   isFromRef,
   FROM_REF,
 } from './utils'
-import { removeInteractivity } from './events'
-import type { ThreeElement } from '../../types/three'
+import { assertNodeMaterialSupported, warnGLSLMaterialUnsupported } from './utils/nodeMaterial'
+import { removeInteractivity, swapInteractivity } from './events'
 
 //* Type Imports ==============================
-import type { RootStore, ConstructorRepresentation, Catalogue, Instance, HostConfig } from '#types'
+import type { RootStore, Instance, HostConfig } from '#types'
+import { extend, toPascalCase, resolveConstructor } from './extend'
+
+export { extend }
 
 type Fiber = Omit<Reconciler.Fiber, 'alternate'> & { refCleanup: null | (() => void); alternate: Fiber | null }
 
@@ -72,41 +85,19 @@ function createReconciler<
 
 const NoEventPriority = 0
 
-//* Cross-Bundle Singleton ==============================
-// Use Symbol.for() to ensure catalogue is shared across bundle boundaries
-// This allows extend() from one entry point to work with JSX from another
-const R3F_CATALOGUE = Symbol.for('@react-three/fiber.catalogue')
-const catalogue: Catalogue = (globalThis as any)[R3F_CATALOGUE] ?? ((globalThis as any)[R3F_CATALOGUE] = {})
-
 const PREFIX_REGEX = /^three(?=[A-Z])/
 
-const toPascalCase = (type: string): string => `${type[0].toUpperCase()}${type.slice(1)}`
-
-let i = 0
-
-const isConstructor = (object: unknown): object is ConstructorRepresentation => typeof object === 'function'
-
-export function extend<T extends ConstructorRepresentation>(objects: T): React.ExoticComponent<ThreeElement<T>>
-export function extend<T extends Catalogue>(objects: T): void
-export function extend<T extends Catalogue | ConstructorRepresentation>(
-  objects: T,
-): React.ExoticComponent<ThreeElement<any>> | void {
-  if (isConstructor(objects)) {
-    const Component = `${i++}`
-    catalogue[Component] = objects
-    return Component as any
-  } else {
-    Object.assign(catalogue, objects)
-  }
-}
-
-function validateInstance(type: string, props: HostConfig['props']): void {
-  // Get target from catalogue
+function validateInstance(type: string, props: HostConfig['props'], root: RootStore): void {
+  // Explicit extend() registrations first, then the three namespace of this root's renderer
   const name = toPascalCase(type)
-  const target = catalogue[name]
+  const target = resolveConstructor(name, root)
 
   // Validate element target
   if (type !== 'primitive' && !target) {
+    // WebGL roots have no node materials; point at the renderer that does
+    if (name.endsWith('NodeMaterial')) {
+      assertNodeMaterialSupported(root.getState(), { isNodeMaterial: true, type: name })
+    }
     throw new Error(
       `R3F: ${name} is not part of the THREE namespace! Did you forget to extend? See: https://docs.pmnd.rs/react-three-fiber/api/objects#using-3rd-party-objects-declaratively`,
     )
@@ -115,15 +106,19 @@ function validateInstance(type: string, props: HostConfig['props']): void {
   // Validate primitives
   if (type === 'primitive' && !props.object) throw new Error(`R3F: Primitives without 'object' are invalid!`)
 
+  // Node material instances: <primitive object={m} /> or <mesh material={m} />
+  assertNodeMaterialSupported(root.getState(), props.object)
+  assertNodeMaterialSupported(root.getState(), props.material)
+
   // Throw if an object or literal was passed for args
   if (props.args !== undefined && !Array.isArray(props.args)) throw new Error('R3F: The args prop must be an array!')
 }
 
 function createInstance(type: string, props: HostConfig['props'], root: RootStore): HostConfig['instance'] {
   // Remove three* prefix from elements if native element not present
-  type = toPascalCase(type) in catalogue ? type : type.replace(PREFIX_REGEX, '')
+  type = resolveConstructor(toPascalCase(type), root) ? type : type.replace(PREFIX_REGEX, '')
 
-  validateInstance(type, props)
+  validateInstance(type, props, root)
 
   // Regenerate the R3F instance for primitives to simulate a new object
   if (type === 'primitive' && props.object?.__r3f) delete props.object.__r3f
@@ -136,6 +131,7 @@ function hideInstance(instance: HostConfig['instance']): void {
     if (instance.props.attach && instance.parent?.object) {
       detach(instance.parent, instance)
     } else if (isObject3D(instance.object)) {
+      instance.previousVisible = instance.object.visible
       instance.object.visible = false
     }
 
@@ -148,10 +144,11 @@ function unhideInstance(instance: HostConfig['instance']): void {
   if (instance.isHidden) {
     if (instance.props.attach && instance.parent?.object) {
       attach(instance.parent, instance)
-    } else if (isObject3D(instance.object) && instance.props.visible !== false) {
-      instance.object.visible = true
+    } else if (isObject3D(instance.object)) {
+      instance.object.visible = instance.previousVisible ?? true
     }
 
+    instance.previousVisible = undefined
     instance.isHidden = false
     invalidateInstance(instance)
   }
@@ -167,13 +164,16 @@ function handleContainerEffects(parent: Instance, child: Instance, beforeChild?:
 
   // Create & link object on first run
   if (!child.object) {
-    // Get target from catalogue
-    const target = catalogue[toPascalCase(child.type)]
+    // Validated by createInstance, so the constructor is known to resolve
+    const target = resolveConstructor(toPascalCase(child.type), child.root)!
 
     // Create object
     child.object = child.props.object ?? new target(...(child.props.args ?? []))
     child.object.__r3f = child
   }
+
+  // A GLSL material, as an element or a primitive; the `material` prop is checked in applyProps
+  warnGLSLMaterialUnsupported(state, child.object)
 
   // Set initial props
   applyProps(child.object, child.props)
@@ -279,6 +279,9 @@ function removeChild(
 ) {
   if (!child) return
 
+  // Unlinking clears the parent, so note whether the child was in the tree to begin with
+  const wasLinked = !!child.parent
+
   // Unlink instances
   child.parent = null
   const childIndex = parent.children.indexOf(child)
@@ -315,8 +318,13 @@ function removeChild(
     disposeOnIdle(child.object)
   }
 
-  // Tree was updated, request a frame for top-level instance
-  if (dispose === undefined) invalidateInstance(child)
+  // Tree was updated, request a frame for top-level instance (invalidateInstance would skip it, since
+  // unlinking cleared its parent). Ask the initial root, not a portal layer, whose copy of `internal`
+  // does not follow `active`: once the root unmounts it has left the scheduler and nothing is drawn
+  if (dispose === undefined && wasLinked) {
+    const state = findInitialRoot(child).getState()
+    if (state.internal.active && state.internal.frames === 0) state.invalidate()
+  }
 }
 
 function setFiberRef(fiber: Fiber, publicInstance: HostConfig['publicInstance']): void {
@@ -335,7 +343,17 @@ function setFiberRef(fiber: Fiber, publicInstance: HostConfig['publicInstance'])
 
 const reconstructed: [oldInstance: HostConfig['instance'], props: HostConfig['props'], fiber: Fiber][] = []
 
-function swapInstances(): void {
+function flushReconstructedInstances(): void {
+  if (reconstructed.length === 0) return
+
+  try {
+    swapReconstructedInstances()
+  } finally {
+    reconstructed.length = 0
+  }
+}
+
+function swapReconstructedInstances(): void {
   // Detach instance
   for (const [instance] of reconstructed) {
     const parent = instance.parent
@@ -361,6 +379,14 @@ function swapInstances(): void {
     // So, we manually check if an instance was hidden and unhide it.
     if (instance.isHidden) unhideInstance(instance)
 
+    // The old object must not survive in the interaction manager as a dead raycast target (#3778).
+    // How it leaves depends on whether a replacement is coming: the second loop hands its state to
+    // the new object via swapInteractivity, and scrubbing it here would destroy exactly what that
+    // transfer needs. Only orphans — instances with no parent, which the second loop skips — are
+    // removed outright.
+    if (isObject3D(instance.object) && !instance.parent) {
+      removeInteractivity(findInitialRoot(instance), instance.object)
+    }
     // Dispose of old object if able
     if (instance.object.__r3f) delete instance.object.__r3f
     if (instance.type !== 'primitive') disposeOnIdle(instance.object)
@@ -372,16 +398,33 @@ function swapInstances(): void {
 
     const parent = instance.parent
     if (parent) {
-      // Get target from catalogue
-      const target = catalogue[toPascalCase(instance.type)]
+      // Validated by createInstance, so the constructor is known to resolve
+      const target = resolveConstructor(toPascalCase(instance.type), instance.root)!
 
       // Create object
+      const prevObject = instance.object
       instance.object = instance.props.object ?? new target(...(instance.props.args ?? []))
       instance.object.__r3f = instance
       setFiberRef(fiber, instance.object)
 
+      // Hand the outgoing object's interaction state to its replacement before anything reads it,
+      // so a hover or an in-flight pointer capture survives the swap rather than being torn down
+      // and rebuilt (#3744). This also retires the old object as a raycast target, which is the
+      // job the first loop skipped for exactly this reason.
+      if (isObject3D(prevObject) && isObject3D(instance.object)) {
+        swapInteractivity(findInitialRoot(instance), prevObject, instance.object)
+      }
+
       // Clear appliedOnce so once() props can be reapplied to the new object
       delete instance.appliedOnce
+
+      // The instance is reused across reconstruction, so eventCount/handlers still reflect the
+      // OLD object. Reset them so applyProps re-derives handlers from the new props and
+      // re-registers the NEW object in the interaction manager — otherwise prevHandlers ===
+      // eventCount, the registration block is skipped, and pointer events silently stop working
+      // after an args change (#3778).
+      instance.eventCount = 0
+      instance.handlers = {}
 
       // Set initial props
       applyProps(instance.object, instance.props)
@@ -404,8 +447,6 @@ function swapInstances(): void {
       invalidateInstance(instance)
     }
   }
-
-  reconstructed.length = 0
 }
 
 // Don't handle text instances, make it no-op
@@ -415,10 +456,136 @@ const NO_CONTEXT: HostConfig['hostContext'] = {}
 
 let currentUpdatePriority: number = NoEventPriority
 
-// https://github.com/facebook/react/blob/main/packages/react-reconciler/src/ReactFiberFlags.js
-const NoFlags = 0
-const Update = 4
+// Mirrors react-dom's getEventPriority for parity with events outside of React
+// https://github.com/facebook/react/blob/main/packages/react-dom-bindings/src/events/ReactDOMEventListener.js
+function getEventPriority(type: string): number {
+  switch (type) {
+    case 'beforetoggle':
+    case 'cancel':
+    case 'click':
+    case 'close':
+    case 'contextmenu':
+    case 'copy':
+    case 'cut':
+    case 'auxclick':
+    case 'dblclick':
+    case 'dragend':
+    case 'dragstart':
+    case 'drop':
+    case 'focusin':
+    case 'focusout':
+    case 'input':
+    case 'invalid':
+    case 'keydown':
+    case 'keypress':
+    case 'keyup':
+    case 'mousedown':
+    case 'mouseup':
+    case 'paste':
+    case 'pause':
+    case 'play':
+    case 'pointercancel':
+    case 'pointerdown':
+    case 'pointerup':
+    case 'ratechange':
+    case 'reset':
+    case 'resize':
+    case 'seeked':
+    case 'submit':
+    case 'touchcancel':
+    case 'touchend':
+    case 'touchstart':
+    case 'volumechange':
+    case 'change':
+    case 'selectionchange':
+    case 'compositionstart':
+    case 'compositionend':
+    case 'compositionupdate':
+    case 'beforeinput':
+    case 'blur':
+    case 'fullscreenchange':
+    case 'focus':
+    case 'hashchange':
+    case 'popstate':
+    case 'select':
+    case 'selectstart':
+      return DiscreteEventPriority
+    case 'drag':
+    case 'dragenter':
+    case 'dragexit':
+    case 'dragleave':
+    case 'dragover':
+    case 'mousemove':
+    case 'mouseout':
+    case 'mouseover':
+    case 'pointermove':
+    case 'pointerout':
+    case 'pointerover':
+    case 'scroll':
+    case 'touchmove':
+    case 'wheel':
+    case 'mouseenter':
+    case 'mouseleave':
+    case 'pointerenter':
+    case 'pointerleave':
+      return ContinuousEventPriority
+    case 'message': {
+      switch (getCurrentPriorityLevel()) {
+        case immediatePriority:
+          return DiscreteEventPriority
+        case userBlockingPriority:
+          return ContinuousEventPriority
+        case normalPriority:
+        case lowPriority:
+          return DefaultEventPriority
+        case idlePriority:
+          return IdleEventPriority
+        default:
+          return DefaultEventPriority
+      }
+    }
+    default:
+      return DefaultEventPriority
+  }
+}
 
+function scheduleMicrotask(callback: () => void): void {
+  if (typeof queueMicrotask === 'function') {
+    queueMicrotask(callback)
+  } else if (typeof Promise !== 'undefined') {
+    Promise.resolve()
+      .then(callback)
+      .catch((error: unknown) => {
+        setTimeout(() => {
+          throw error
+        })
+      })
+  } else {
+    setTimeout(callback)
+  }
+}
+
+/**
+ * R3F's React reconciler: a mutation-mode host config that turns JSX elements into three.js objects.
+ * Each root's {@link RootStore} is its container, and children attach to `internal.container`
+ * (a portal's target) or else the root's `scene`.
+ *
+ * - **Element names** resolve through `extend()` registrations first, then the three namespace of
+ *   the root's renderer. A `three` prefix (`<threeLine>`) is stripped when no element by the
+ *   prefixed name exists. `<primitive object={...}>` wraps an existing object.
+ * - **Construction is deferred** until an instance is attached to a mounted parent, so a tree that
+ *   Suspense discards never creates three objects.
+ * - **Updates** apply only changed props. Changing `args` (or a primitive's `object`) reconstructs
+ *   the object instead; the swap happens in `resetAfterCommit`, before layout effects, so refs
+ *   already point to the new object.
+ * - **Removal** detaches the object and disposes it (at idle priority, or immediately in an `act`
+ *   test environment), unless it is a primitive, a `Scene`, or it or an ancestor has `dispose={null}`.
+ * - **Priority**: not the primary renderer, so it runs alongside react-dom, and update priority
+ *   follows react-dom's event priorities. View-transition commits are flushed synchronously, since
+ *   three has nothing to animate between commits.
+ *
+ * `createRoot`, `createPortal` and `flushSync` drive it; app code rarely needs it directly.
+ */
 export const reconciler = /* @__PURE__ */ createReconciler<
   HostConfig['type'],
   HostConfig['props'],
@@ -478,7 +645,10 @@ export const reconciler = /* @__PURE__ */ createReconciler<
     newProps: HostConfig['props'],
     fiber: Fiber,
   ) {
-    validateInstance(type, newProps)
+    // `type` is the raw JSX tag. createInstance may have stripped a `three` prefix from it
+    // (`<threeLine>` → `Line`) and stored the resolved name on the instance; validating the raw
+    // tag here would throw "ThreeLine is not part of the THREE namespace" on the first update.
+    validateInstance(instance.type, newProps, instance.root)
 
     let reconstruct = false
 
@@ -489,21 +659,23 @@ export const reconciler = /* @__PURE__ */ createReconciler<
     // Reconstruct instance if args were changed
     else if (newProps.args?.some((value, index) => value !== oldProps.args?.[index])) reconstruct = true
 
-    // Reconstruct when args or <primitive object={...} have changes
+    // Reconstruct when args or <primitive object={...} have changes.
+    // Instances are swapped at the end of the mutation phase (resetAfterCommit)
     if (reconstruct) {
-      reconstructed.push([instance, { ...newProps }, fiber])
+      reconstructed.push([instance, getInstanceProps(newProps), fiber])
     } else {
       // Create a diff-set, flag if there are any changes
       const changedProps = diffProps(instance, newProps)
-      if (Object.keys(changedProps).length) {
-        Object.assign(instance.props, changedProps)
-        applyProps(instance.object, changedProps)
-      }
-    }
 
-    // Flush reconstructed siblings when we hit the last updated child in a sequence
-    const isTailSibling = fiber.sibling === null || (fiber.flags & Update) === NoFlags
-    if (isTailSibling) swapInstances()
+      // Replace the old prop snapshot after computing the diff
+      //`attach` is preserved since it cannot be updated dynamically
+      const attach = instance.props.attach
+      instance.props = getInstanceProps(newProps)
+      if (attach !== undefined) instance.props.attach = attach
+      else delete instance.props.attach
+
+      if (Object.keys(changedProps).length) applyProps(instance.object, changedProps)
+    }
   },
   finalizeInitialChildren: (instance) => {
     // Check if any props contain fromRef markers that need to be resolved after mount
@@ -518,8 +690,8 @@ export const reconciler = /* @__PURE__ */ createReconciler<
     for (const prop in instance.props) {
       const value = instance.props[prop]
       if (isFromRef(value)) {
-        const ref = value[FROM_REF]
-        if (ref.current != null) resolved[prop] = ref.current
+        const { [FROM_REF]: ref, transform } = value
+        if (ref.current != null) resolved[prop] = transform ? transform(ref.current) : ref.current
       }
     }
     if (Object.keys(resolved).length) applyProps(instance.object, resolved)
@@ -531,7 +703,9 @@ export const reconciler = /* @__PURE__ */ createReconciler<
     const target = container.getState().internal.container ?? container.getState().scene
     return prepare(target, container, '', {})
   },
-  resetAfterCommit: () => {},
+  // Reconstructed instances are swapped once all mutations are committed,
+  // before layout effects run so refs point to the new objects
+  resetAfterCommit: flushReconstructedInstances,
   shouldSetTextContent: () => false,
   clearContainer: () => false,
   hideInstance,
@@ -539,6 +713,9 @@ export const reconciler = /* @__PURE__ */ createReconciler<
   createTextInstance: handleTextInstance,
   hideTextInstance: handleTextInstance,
   unhideTextInstance: handleTextInstance,
+  // Mirrors react-dom, which flushes discrete work in microtasks
+  supportsMicrotasks: true,
+  scheduleMicrotask,
   scheduleTimeout: (typeof setTimeout === 'function' ? setTimeout : undefined) as any,
   cancelTimeout: (typeof clearTimeout === 'function' ? clearTimeout : undefined) as any,
   noTimeout: -1,
@@ -572,28 +749,9 @@ export const reconciler = /* @__PURE__ */ createReconciler<
   resolveUpdatePriority() {
     if (currentUpdatePriority !== NoEventPriority) return currentUpdatePriority
 
-    switch (typeof window !== 'undefined' && window.event?.type) {
-      case 'click':
-      case 'contextmenu':
-      case 'dblclick':
-      case 'dragenter':
-      case 'dragleave':
-      case 'drop':
-      case 'pointercancel':
-      case 'pointerdown':
-      case 'pointerup':
-        return DiscreteEventPriority
-      case 'dragover':
-      case 'pointermove':
-      case 'pointerout':
-      case 'pointerover':
-      case 'pointerenter':
-      case 'pointerleave':
-      case 'wheel':
-        return ContinuousEventPriority
-      default:
-        return DefaultEventPriority
-    }
+    const eventType = typeof window !== 'undefined' ? window.event?.type : undefined
+    if (eventType === undefined) return DefaultEventPriority
+    return getEventPriority(eventType)
   },
   resetFormInstance() {},
   // @ts-ignore DefinitelyTyped is not up to date
@@ -621,9 +779,54 @@ export const reconciler = /* @__PURE__ */ createReconciler<
 
   // https://github.com/facebook/react/pull/32451
   // https://github.com/facebook/react/pull/32760
-  startGestureTransition: () => null,
-  startViewTransition: () => null,
+  // React hands the whole commit to the host when a transition touches a <ViewTransition> subtree.
+  // three.js has nothing to animate between commits, so this mirrors the react-dom fallback for
+  // browsers without document.startViewTransition and flushes the commit synchronously.
+  startViewTransition(
+    _suspendedState: null,
+    _rootContainer: RootStore,
+    _transitionTypes: null | string[],
+    mutationCallback: () => void,
+    layoutCallback: () => void,
+    _afterMutationCallback: () => void,
+    spawnedWorkCallback: () => void,
+    _passiveCallback: () => void,
+    _errorCallback: (_error: unknown) => void,
+    _blockedCallback: (_reason: string) => void,
+    finishedAnimation: (() => void) | null,
+  ): null {
+    mutationCallback()
+    layoutCallback()
+    // afterMutationCallback only measures for animations and spawned work schedules the passive
+    // effects itself, so both are skipped. Production builds pass null for finishedAnimation
+    finishedAnimation?.()
+    spawnedWorkCallback()
+    return null
+  },
+  startGestureTransition(
+    _suspendedState: null,
+    _rootContainer: RootStore,
+    _timeline: null,
+    _rangeStart: number,
+    _rangeEnd: number,
+    _transitionTypes: null | string[],
+    mutationCallback: () => void,
+    animateCallback: () => void,
+    _errorCallback: (_error: unknown) => void,
+    finishedAnimation: (() => void) | null,
+  ): null {
+    mutationCallback()
+    animateCallback()
+    finishedAnimation?.()
+    return null
+  },
   stopViewTransition(_transition: null) {},
+
+  // https://github.com/facebook/react/pull/35564
+  // Only reached with a non-null transition from startViewTransition, which never returns one here
+  addViewTransitionFinishedListener(_transition: null, callback: () => void) {
+    callback()
+  },
 
   // https://github.com/facebook/react/pull/32038
   createViewTransitionInstance: (_name: string): null => null,
@@ -641,12 +844,14 @@ export const reconciler = /* @__PURE__ */ createReconciler<
   cloneMutableTextInstance(textInstance: any) {
     return textInstance
   },
-  cloneRootViewTransitionContainer(_rootContainer: any) {
-    throw new Error('Not implemented.')
-  },
-  removeRootViewTransitionClone(_rootContainer: any, _clone: any) {
-    throw new Error('Not implemented.')
-  },
+  // React 19.2 added these for root-level view transitions. They only run for hosts that opt into
+  // view transitions by returning a container from cloneRootViewTransitionContainer; R3F renders
+  // into a WebGL/WebGPU canvas, where cloning the root has no meaning, so we never opt in and
+  // React never calls them. They stay as no-ops rather than throws: the host config is shared by
+  // every root, and a throw here would turn a React-internal probe into a hard crash for users.
+  // Guarded by a test asserting a full render + unmount never reaches them.
+  cloneRootViewTransitionContainer(_rootContainer: any): void {},
+  removeRootViewTransitionClone(_rootContainer: any, _clone: any): void {},
 
   // https://github.com/facebook/react/pull/32465
   createFragmentInstance: (_fiber: any): null => null,
@@ -667,3 +872,14 @@ export const reconciler = /* @__PURE__ */ createReconciler<
   // https://github.com/facebook/react/pull/34522
   getSuspendedCommitReason: (_state: any, _rootContainer: any) => null,
 })
+
+/**
+ * Force React to flush any updates inside the provided callback synchronously and immediately.
+ * All the same caveats documented for react-dom's `flushSync` apply here (see https://react.dev/reference/react-dom/flushSync).
+ * Nevertheless, sometimes one needs to render synchronously, for example to keep DOM and 3D changes in lock-step without
+ * having to revert to a non-React solution. Note: this will only flush updates within the `Canvas` root.
+ */
+export function flushSync<R>(fn: () => R): R {
+  // @ts-ignore - reconciler types are not maintained
+  return reconciler.flushSyncFromReconciler(fn)
+}

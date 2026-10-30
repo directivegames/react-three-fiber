@@ -12,6 +12,27 @@
 import { WebGL2RenderingContext } from '../../test-renderer/src/WebGL2RenderingContext'
 import { vi } from 'vitest'
 
+//* Renderer supports ==============================
+// The root entry loads a renderer's support with a dynamic import the first time a root asks for
+// it. Many tests render on a root without awaiting `configure()` first and rely on act() flushing
+// that setup, which holds once the module is cached (the import resolves in a microtask) but not
+// while vite is still transforming it. Importing both here warms the cache; it registers nothing
+// and changes no behaviour under test.
+import '../src/support/webgl'
+import '../src/support/webgpu'
+
+// jsdom has no ImageBitmap. The root entry renders with WebGPURenderer, whose WebGL2 fallback
+// backend checks `image instanceof ImageBitmap` while uploading a texture (the scene's environment
+// and output textures included), so any test that lets a frame render on the root entry threw a
+// ReferenceError, depending on whether a frame landed before it finished.
+if (typeof globalThis.ImageBitmap === 'undefined') {
+  ;(globalThis as any).ImageBitmap = class ImageBitmap {
+    width = 0
+    height = 0
+    close() {}
+  }
+}
+
 // Mock react-use-measure globally for tests
 vi.mock('react-use-measure', () => ({
   default: vi.fn(() => [() => {}, { width: 1280, height: 800, top: 0, left: 0, bottom: 800, right: 1280, x: 0, y: 0 }]),
@@ -123,3 +144,33 @@ Object.defineProperties(HTMLCanvasElement.prototype, {
   clientWidth: { get: () => 1280 },
   clientHeight: { get: () => 800 },
 })
+
+//* Pointer Capture Polyfill ==============================
+// jsdom implements PointerEvent poorly and the capture API not at all, so `setPointerCapture` is
+// simply absent from elements. R3F's pointer-capture path calls straight through to it, which means
+// any test that captures a pointer dies on the DOM call rather than on the behaviour it is testing.
+//
+// Modelled on the real contract rather than stubbed to no-ops, because the failure modes are the
+// interesting part: releasing an id that is not captured throws `NotFoundError` in browsers, and
+// code that unmounts mid-drag has to survive that.
+const capturedPointers = new WeakMap<Element, Set<number>>()
+
+if (!Element.prototype.setPointerCapture) {
+  Element.prototype.setPointerCapture = function (pointerId: number) {
+    let ids = capturedPointers.get(this)
+    if (!ids) capturedPointers.set(this, (ids = new Set()))
+    ids.add(pointerId)
+  }
+
+  Element.prototype.hasPointerCapture = function (pointerId: number) {
+    return capturedPointers.get(this)?.has(pointerId) ?? false
+  }
+
+  Element.prototype.releasePointerCapture = function (pointerId: number) {
+    const ids = capturedPointers.get(this)
+    if (!ids?.has(pointerId)) {
+      throw new DOMException(`Failed to release pointer capture for pointerId ${pointerId}`, 'NotFoundError')
+    }
+    ids.delete(pointerId)
+  }
+}

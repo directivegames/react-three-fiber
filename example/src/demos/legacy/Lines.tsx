@@ -1,5 +1,5 @@
 import { Line } from '@react-three/drei'
-import { Canvas, type ThreeElements, type ThreeEvent, type Vector3 } from '@react-three/fiber'
+import { Canvas, type ThreeElements, type ThreeEvent, type Vector3 } from '@react-three/fiber/legacy'
 import { useState } from 'react'
 
 function PolyLine({
@@ -59,10 +59,7 @@ function EndPoint({
 
 export default function App() {
   return (
-    <Canvas
-      orthographic
-      raycaster={{ params: { Line: { threshold: 5 } } as any }}
-      camera={{ position: [0, 0, 500], zoom: 1 }}>
+    <Canvas orthographic raycaster={{ params: { Line: { threshold: 5 } } }} camera={{ position: [0, 0, 500], zoom: 1 }}>
       <PolyLine defaultStart={[-100, -100, 0]} defaultEnd={[0, 100, 0]} />
       <PolyLine defaultStart={[0, 100, 0]} defaultEnd={[100, -100, 0]} />
     </Canvas>

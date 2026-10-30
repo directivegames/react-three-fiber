@@ -4,14 +4,14 @@ import { useEffect, useRef, useState } from 'react'
 import * as THREE from 'three'
 
 function AdaptivePixelRatio() {
-  const gl = useThree((state) => state.gl)
+  const renderer = useThree((state) => state.renderer)
   const current = useThree((state) => state.performance.current)
   const initialDpr = useThree((state) => state.viewport.initialDpr)
   const setDpr = useThree((state) => state.setDpr)
 
   // Restore initial pixelratio on unmount
   useEffect(() => {
-    const domElement = gl.domElement
+    const domElement = renderer.domElement
     return () => {
       setDpr(initialDpr)
       domElement.style.imageRendering = 'auto'
@@ -21,7 +21,7 @@ function AdaptivePixelRatio() {
   // Set adaptive pixelratio
   useEffect(() => {
     setDpr(current * initialDpr)
-    gl.domElement.style.imageRendering = current === 1 ? 'auto' : 'pixelated'
+    renderer.domElement.style.imageRendering = current === 1 ? 'auto' : 'pixelated'
   }, [current])
 
   return null
@@ -90,7 +90,7 @@ function Scene() {
 
 export default function App() {
   return (
-    <Canvas renderer dpr={[1, 2]} frameloop="always" performance={{ min: 0.1 }}>
+    <Canvas dpr={[1, 2]} frameloop="always" performance={{ min: 0.1 }}>
       <Scene />
     </Canvas>
   )

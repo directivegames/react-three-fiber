@@ -1,23 +1,179 @@
 # @react-three/fiber
 
+## 10.0.0-alpha.6
+
+Full detail is in
+[`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha6) at the repo root.
+
+### Breaking Changes
+
+- `@react-three/fiber` renders with `WebGPURenderer` by default; `WebGLRenderer` is only on
+  `@react-three/fiber/legacy`. `gl={...}` on the default import throws, and GLSL materials on a
+  WebGPU canvas warn in development (#4013).
+- Its hooks and `Canvas` are typed for `WebGPURenderer`; `RootState` stays the shared base (#4020).
+  See [v10 Breaking Changes](https://r3f.docs.pmnd.rs/next/migration/breaking-changes) for every breaking change since v9.
+- The TSL resource hooks moved to `@react-three/tsl`; the deprecated standalone TSL utilities are
+  removed, and `state.uniforms` and friends are added by that package.
+- Multi-canvas is configured with `<Canvas primary>` and `share`; `renderer={{ primaryCanvas }}`
+  throws.
+- `scheduler` is a Canvas prop on every entry; `renderer={{ scheduler }}` throws.
+- `shadows` moved into `renderer={{ shadows }}` / `gl={{ shadows }}`; the top-level prop throws.
+- The `onUpdate` prop is removed.
+- `<Environment>` / `useEnvironment` drop the split gain map format.
+- `@pmndrs/scheduler` 0.3: the `physics` phase is a fixed 1/60 timestep.
+
+### Deprecations
+
+- `@react-three/fiber/webgpu`: import from `@react-three/fiber` instead; its hooks are typed for
+  WebGPU. Removed in the first beta (#4013).
+
+### Features
+
+- The core no longer imports three; the default import loads the WebGPU renderer on demand.
+- `Register` narrows the renderer type app-wide; the Canvas `renderer` prop is typed.
+- `registerRootExtension`, `setRenderOverride` and the `@react-three/fiber/extension` entry.
+- Fixed-timestep phases and `state.overstep` from `@pmndrs/scheduler` 0.3.
+- Shader-shaping material props set `material.needsUpdate` (#3993).
+- `root.ready`, synchronous configure and render, and `<Activity>` visibility inside the Canvas
+  (#4007).
+- The canvas follows `devicePixelRatio` changes (#3975).
+- React 19.3 support, including `<ViewTransition>` inside the canvas (#3935).
+
+### Bug Fixes
+
+- Multi-canvas works under the WebGL2 fallback, and sharing canvases no longer change the primary's
+  renderer settings (#3996).
+- R3F disposes the renderers it creates once the last canvas using them unmounts (#3974).
+- Roots tear down at React's unmount commit instead of after a timer (#3973).
+- Removing an object under `frameloop="demand"` requests a frame (#3989).
+- Node materials on a WebGL canvas throw a clear error (#3995).
+- Visibility, pointer capture and runtime settings survive `<Activity>`, reconstruction and Canvas
+  re-renders (#4007).
+- `extend()` and `useFrame` ids are unique across copies of fiber and renderers.
+
+## 10.0.0-alpha.5
+
+Full detail is in
+[`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha5) at the repo root.
+
+### Types
+
+- WebGPU uniform hooks keep three's exact node generics and the input's exact keys; the stale
+  `ShaderNodeObject`/`Fn` augmentations are removed.
+- `Matrix2` uniforms, `Storage3DTexture`/`StorageArrayTexture` storage, a value-typed `once()`,
+  and a WebGPU-narrowed `Canvas.onCreated` on the `/webgpu` entry.
+- Reader-mode resource hooks accept an explicit schema; `extend(THREE)` needs no cast; partial
+  `raycaster.params`, any `Element` as `eventSource`, and typed `<primitive>` events.
+
+### Bug Fixes
+
+- `useTexture`'s `onLoad` receives the keyed record for record inputs.
+- `<threeLine>` and other prefixed elements survive their first prop update.
+- A removed prop resets to the class default instead of `0` for classes whose constructor takes
+  arguments.
+- `fromRef(ref, transform)` maps the resolved sibling before assignment.
+- Six-file `.hdr` cube sets load through `HDRCubeTextureLoader`.
+- A lone primary `<Canvas id>` owns the renderer's default canvas target (#3905).
+- Canvas honors the `resize.debounce` prop after the initial measurement (#3881).
+- `useRenderPipeline` callbacks get WebGPU-typed state and a return narrowed on `isReady` (#3901).
+
+## 10.0.0-alpha.4
+
+Full detail is in
+[`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha4) at the repo root.
+
+### Features
+
+- Canvas frameloop lifecycle, invalidation, manual stepping and ordering are now scoped to scheduler
+  roots through `@pmndrs/scheduler@0.2`.
+- `renderer.scheduler` accepts root-level `before`, `after` and numeric `order`; `fps` remains scoped
+  to the default render job.
+- `useFrame` controls expose the owning `rootId` and root-scoped `invalidate()`.
+- WebGPU `useThree` and `useFrame` narrow renderer state to `WebGPURenderer`.
+
+### Bug Fixes
+
+- `useRenderPipeline` rebuilds recompile changed output graphs, dispose replaced scene passes and
+  provide callbacks with a non-null `renderPipeline` type.
+- Suspending beneath Canvas no longer destroys and recreates the renderer root under StrictMode.
+- Array and record forms of `useTexture` no longer enter a registry-driven render loop.
+- Shared WebGPU renderers resize the owning Canvas target and refresh stale backend attachments.
+- The optional three.js Inspector no longer creates an eager Turbopack import cycle.
+- Scoped TSL resource names are sanitized into valid WGSL identifiers.
+
+## 10.0.0-alpha.3
+
+Full detail, with migration notes and examples, is in
+[`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha3) at the repo root. This is the summary.
+
+### Breaking Changes
+
+- **`three` peer floor raised to `>=0.185.0`** (from `>=0.181.2`). If you are on r181–r184 you
+  cannot install alpha.3 — upgrade three alongside R3F. v10 now uses three's own `RenderPipeline`,
+  `CubeRenderTarget` and `UniformNode` types rather than shadowing them.
+- **`act` is no longer re-exported.** Import it from React instead — it is the same function.
+
+### Features
+
+- Interactive priority: `userData.interactivePriority` takes precedence over distance-based hit
+  testing, for UI controls that render on top via depth tricks
+- `useBuffers` and `useGPUStorage` for GPU compute (experimental)
+- `useTextures`, a reactive texture registry (experimental)
+- Multi-canvas rendering on WebGPU via `renderer={{ primaryCanvas: 'id' }}`, with shared state
+- Camera scene parenting, so children of the camera render and track it
+- `forceEven` and `background` Canvas props
+- `fromRef` and `once` prop utilities
+- The frame scheduler moved out to `@pmndrs/scheduler`
+
+### Bug Fixes
+
+- Visibility handlers (`onFramed`/`onOccluded`/`onVisible`) no longer keep a stale closure — inline
+  handlers now fire the current callback
+- TSL hot module replacement no longer rebuilds against stale scoped state
+- Multi-canvas TSL state is shared via `primaryStore`
+- Runtime `setFrameloop()` reaches the scheduler
+- `state.frustum` is current when read during the render phase
+- `createPortal` no longer leaks subscriptions; portal `size` survives parent resizes
+- Pointer events survive an `args`-triggered reconstruction
+- `ShaderMaterial` uniforms keep a stable target reference
+- Reconciler hardening from `@react-three/fiber@9.7.0` ported over, including react-dom event
+  priorities and microtask scheduling
+- `useLoader` / `.preload` / `.clear` accept a custom `cacheKey`
+
 ## 10.0.0-alpha.2
 
-- Canvas Size Control - Added width and height props to Canvas for explicit resolution control
-- Enhanced setSize() API with square shorthand and reset capability
-- Ownership model: imperative setSize(w, h) takes control until setSize() resets ScopedStore for Type-Safe Uniform/Node Access
-- New createScopedStore<T>() wrapper for TypeScript-friendly access to uniforms/nodes
+### Features
+
+#### Canvas Size Control
+
+- Added `width` and `height` props to Canvas for explicit resolution control
+- Enhanced `setSize()` API with square shorthand and reset capability
+- Ownership model: imperative `setSize(w, h)` takes control until `setSize()` resets
+
+#### ScopedStore for Type-Safe Uniform/Node Access
+
+- New `createScopedStore<T>()` wrapper for TypeScript-friendly access to uniforms/nodes
 - Eliminates manual casting in creator functions
-- New exports: ScopedStoreType<T>, CreatorState HMR Support for TSL Hooks
+- New exports: `ScopedStoreType<T>`, `CreatorState`
+
+#### HMR Support for TSL Hooks
+
 - Automatic Hot Module Replacement for WebGPU TSL hooks
 - Canvas detects Vite/webpack HMR events and rebuilds nodes/uniforms
-- New hmr prop on Canvas, rebuildNodes(), rebuildUniforms() utils Bug Fixes
-- Fixed useNodes() and useUniforms() reader modes not updating when store changes
-- Fixed usePostProcessing callbacks not re-running after HMR
-- Fixed absolute Windows paths in bundled type declarations (FiberRoot now defined locally)
-- Fixed eslint-plugin codegen not awaiting prettier format Maintenance
+- New `hmr` prop on Canvas, `rebuildNodes()`, `rebuildUniforms()` utils
+
+### Bug Fixes
+
+- Fixed `useNodes()` and `useUniforms()` reader modes not updating when store changes
+- Fixed `usePostProcessing` callbacks not re-running after HMR
+- Fixed absolute Windows paths in bundled type declarations (`FiberRoot` now defined locally)
+- Fixed eslint-plugin codegen not awaiting prettier format
+
+### Maintenance
+
 - Migrated to ESLint 9 flat config
 - Updated Vite to v7, Prettier to v3, Husky to v9, lint-staged to v16
-- Converted verify-bundles.js to ES modules
+- Converted `verify-bundles.js` to ES modules
 
 ## 10.0.0-alpha.1
 

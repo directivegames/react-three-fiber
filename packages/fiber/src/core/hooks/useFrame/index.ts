@@ -1,27 +1,37 @@
 //* useFrame Hook ==============================
 
 import * as React from 'react'
-import { context } from '../../store'
-import { useMutableCallback, useIsomorphicLayoutEffect } from '../../utils'
+// Leaf imports (no #three) so useFrame can ship in the three-free @react-three/fiber/extension entry.
+import { context } from '../../context'
+import { useMutableCallback, useIsomorphicLayoutEffect } from '../../utils/react'
 import { notifyDepreciated } from '../../utils/notices'
-import { getScheduler, type Scheduler } from './scheduler'
+import { cloneState } from '../../utils/stateAccessors'
+import { getScheduler, type Scheduler } from '@pmndrs/scheduler'
 
 //* Type Imports ==============================
-import type { FrameNextCallback, UseFrameNextOptions, FrameNextControls } from '#types'
+// Direct type-file imports, not the #types barrel: the barrel side-effect-imports the JSX element
+// augmentation (types/three.d.ts), which must not leak into the three-free extension entry.
+import type {
+  FrameNextState,
+  FrameNextCallback,
+  UseFrameNextOptions,
+  FrameNextControls,
+} from '../../../../types/scheduler'
 
 /**
  * Frame hook with phase-based ordering, priority, and FPS throttling.
  *
- * Works both inside and outside Canvas context:
- * - Inside Canvas: Full RootState (gl, scene, camera, etc.)
- * - Outside Canvas (waiting mode): Waits for Canvas to mount, then gets full state
- * - Outside Canvas (independent mode): Fires immediately with timing-only state
+ * Always delivers full RootState — works both inside and outside Canvas context:
+ * - Inside Canvas: Full RootState (renderer, scene, camera, etc.)
+ * - Outside Canvas: The job registers immediately but the callback is held until a
+ *   Canvas adopts it, then runs with full RootState. For hostless / standalone
+ *   frame loops with no Canvas, use `@pmndrs/scheduler` directly.
  *
  * Returns a controls object for manual stepping, pausing, and resuming.
  *
  * @param callback - Function called each frame with (state, delta). Optional if you only need scheduler access.
  * @param priorityOrOptions - Either a priority number (backwards compat) or options object
- * @returns Controls object with step(), stepAll(), pause(), resume(), isPaused, id, scheduler
+ * @returns Controls object with step(), stepAll(), invalidate(), pause(), resume(), isPaused, id, rootId, scheduler
  *
  * @example
  * // Simple priority (backwards compat)
@@ -32,16 +42,16 @@ import type { FrameNextCallback, UseFrameNextOptions, FrameNextControls } from '
  * useFrame((state, delta) => { ... }, { phase: 'physics' })
  *
  * @example
- * // Outside Canvas - waits for Canvas to mount
+ * // Outside Canvas - callback waits for a Canvas, then always has full state
  * function UI() {
  *   useFrame((state, delta) => { syncUI(state.camera) });
  *   return <button>...</button>;
  * }
  *
  * @example
- * // Independent mode - no Canvas needed
- * getScheduler().independent = true;
- * useFrame((state, delta) => { updateGame(delta) });
+ * // Hostless / standalone loop (no Canvas) - use @pmndrs/scheduler directly
+ * import { getScheduler } from '@pmndrs/scheduler'
+ * getScheduler().register((state, delta) => { updateGame(delta) })
  *
  * @example
  * // Scheduler-only access (no callback)
@@ -84,9 +94,11 @@ export function useFrame(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [optionsKey])
 
-  // Generate stable ID if not provided
-  const reactId = React.useId()
-  const id = options.id ?? reactId
+  // Generate a stable ID if not provided. Not React.useId(): that is only unique within one
+  // renderer, and react-dom and every copy of fiber's reconciler count from zero on their own. The
+  // scheduler tracks job ids globally, so a collision could make one job's unsubscribe miss it.
+  const [generatedId] = React.useState(() => scheduler.generateJobId())
+  const id = options.id ?? generatedId
 
   // Memoize callback ref (always points to latest callback)
   const callbackRef = useMutableCallback(callback)
@@ -96,11 +108,26 @@ export function useFrame(
   // This incremented internal.priority, causing the default renderer to skip
   // We maintain this behavior for backwards compatibility while warning about deprecation
   const isLegacyPriority = typeof priorityOrOptions === 'number' && priorityOrOptions > 0
+  // A negative number only ever meant "run before the default (0) jobs" in v9. v10 maps the
+  // number to { priority } and sorts higher first, so that intent is silently reversed — warn.
+  const isLegacyOrdering = typeof priorityOrOptions === 'number' && priorityOrOptions < 0
 
   // Subscribe on mount, unsubscribe on unmount (only if callback provided)
   useIsomorphicLayoutEffect(() => {
     // Skip registration if no callback - user just wants scheduler access
     if (!callback) return
+
+    if (isLegacyOrdering) {
+      notifyDepreciated({
+        heading: 'useFrame numeric priority order is reversed in v10',
+        body:
+          'useFrame(callback, number) is deprecated and its ordering direction is reversed from v9: ' +
+          'v9 ran lower numbers first, v10 maps the number to { priority } and runs higher numbers first, ' +
+          'so a negative priority now runs after default-priority jobs.\n\n' +
+          'Use { before, after } to name the dependency, or { priority } with the v10 direction (higher = earlier).',
+        link: 'https://docs.pmnd.rs/react-three-fiber/api/hooks#useframe',
+      })
+    }
 
     if (isInsideCanvas) {
       //* ===== INSIDE CANVAS: Full RootState behavior =====
@@ -124,22 +151,22 @@ export function useFrame(
           body:
             'Using useFrame(callback, number) to control render order is deprecated.\n\n' +
             'For custom rendering, use: useFrame(callback, { phase: "render" })\n' +
-            'For execution order within update phase, use: useFrame(callback, { priority: number })',
+            'For execution order within a phase, use: useFrame(callback, { priority: number }) — higher runs first, the reverse of v9',
           link: 'https://docs.pmnd.rs/react-three-fiber/api/hooks#useframe',
         })
       }
 
       // Wrapper that merges store state with timing (for portal isolation)
       const wrappedCallback: FrameNextCallback = (frameState, delta) => {
-        const localState = store.getState()
-        const mergedState = {
-          ...localState,
-          time: frameState.time,
-          delta: frameState.delta,
-          elapsed: frameState.elapsed,
-          frame: frameState.frame,
-        }
-        callbackRef.current?.(mergedState as typeof frameState, delta)
+        // Copied with its accessors, not spread: a spread would read `state.gl` and log its
+        // deprecation notice for every WebGPU app
+        const mergedState = cloneState<FrameNextState>(store.getState())
+        mergedState.time = frameState.time
+        mergedState.delta = frameState.delta
+        mergedState.elapsed = frameState.elapsed
+        mergedState.frame = frameState.frame
+        mergedState.overstep = frameState.overstep
+        callbackRef.current?.(mergedState, delta)
       }
 
       // Register with global scheduler
@@ -167,29 +194,26 @@ export function useFrame(
         }
       }
     } else {
-      //* ===== OUTSIDE CANVAS: New behavior =====
-      const registerOutside = () => {
-        return scheduler.register((state, delta) => callbackRef.current?.(state, delta), { id, ...options })
-      }
-
-      // Independent mode or root already exists: register now
-      if (scheduler.independent || scheduler.isReady) {
-        return registerOutside()
-      }
-
-      // Wait for a Canvas to mount
-      let unregisterJob: (() => void) | null = null
-      const unsubReady = scheduler.onRootReady(() => {
-        unregisterJob = registerOutside()
-      })
-
-      return () => {
-        unsubReady()
-        unregisterJob?.()
-      }
+      //* ===== OUTSIDE CANVAS: host-guaranteed =====
+      // r3f's useFrame always delivers full RootState. The job registers
+      // immediately (lands on the scheduler's lazily-created ambient root) but the
+      // callback is held until a Canvas adopts the job and host state is present.
+      // We probe `state.renderer` (the modern host marker; `state.gl` is deprecated
+      // and warns on access) — absent on the timing-only ambient frames, present
+      // once a Canvas adopts the job. For hostless / standalone loops, use
+      // @pmndrs/scheduler directly.
+      // @see @pmndrs/scheduler docs/design/ambient-root.md
+      return scheduler.register(
+        (state, delta) => {
+          const frameState = state as FrameNextState
+          if (!frameState.renderer) return // no host yet — wait for a Canvas
+          callbackRef.current?.(frameState, delta)
+        },
+        { id, ...options },
+      )
     }
     // Note: `callback` intentionally excluded - useMutableCallback handles updates
-  }, [store, scheduler, id, optionsKey, isLegacyPriority, isInsideCanvas])
+  }, [store, scheduler, id, optionsKey, isLegacyPriority, isLegacyOrdering, isInsideCanvas])
 
   // Reactive isPaused via useSyncExternalStore --------------------------------
   const isPaused = React.useSyncExternalStore(
@@ -221,6 +245,14 @@ export function useFrame(
       scheduler: scheduler as Scheduler,
 
       /**
+       * The root that currently owns this job. Resolve on access because ambient
+       * jobs can be adopted by a Canvas after the controls object is created.
+       */
+      get rootId() {
+        return getScheduler().getJobRootId(id)
+      },
+
+      /**
        * Manually step this job only.
        * Bypasses FPS limiting - always runs.
        * @param timestamp Optional timestamp (defaults to performance.now())
@@ -236,6 +268,15 @@ export function useFrame(
        */
       stepAll: (timestamp?: number) => {
         getScheduler().step(timestamp)
+      },
+
+      /**
+       * Request frames for this job's owning root without waking sibling roots.
+       */
+      invalidate: (frames?: number, stackFrames?: boolean) => {
+        const scheduler = getScheduler()
+        const rootId = scheduler.getJobRootId(id)
+        if (rootId) scheduler.invalidateRoot(rootId, frames, stackFrames)
       },
 
       /**
@@ -264,5 +305,5 @@ export function useFrame(
   return controls
 }
 
-// Re-export scheduler
-export { getScheduler, Scheduler } from './scheduler'
+// Re-export scheduler (now sourced from @pmndrs/scheduler) for backwards compatibility
+export { getScheduler, Scheduler } from '@pmndrs/scheduler'

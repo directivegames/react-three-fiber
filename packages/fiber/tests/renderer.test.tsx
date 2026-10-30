@@ -1,9 +1,9 @@
 import * as React from 'react'
+import { act } from 'react'
 import * as THREE from 'three'
 import {
   ReconcilerRoot,
   createRoot,
-  act,
   extend,
   ThreeElement,
   ThreeElements,
@@ -12,9 +12,9 @@ import {
   createPortal,
   useFrame,
 } from '../src/index'
+import type { RootState, RootStore } from '../src/index'
+import { createRoot as createLegacyRoot } from '../src/legacy'
 import { suspend } from 'suspend-react'
-
-extend(THREE as any)
 
 class Mock extends THREE.Group {
   static instances: string[]
@@ -29,6 +29,8 @@ declare module '@react-three/fiber' {
   interface ThreeElements {
     mock: ThreeElement<typeof Mock>
     threeRandom: ThreeElement<typeof THREE.Group>
+    namespaceGroup: ThreeElement<typeof THREE.Group>
+    nAMESPACE_CONSTANT: Record<string, never>
   }
 }
 
@@ -71,6 +73,44 @@ describe('renderer', () => {
     expect(scene.children.length).toBe(2)
     expect(scene.children[1]).toBeInstanceOf(THREE.Group)
     expect(scene.children[1].name).toBe('native')
+  })
+
+  it('registers only the constructors of an extended namespace', async () => {
+    // extend(THREE) hands over a whole module namespace: functions and constants ride along
+    // with the classes. Only constructors become elements; nothing else is registered.
+    class NamespaceGroup extends THREE.Group {}
+    extend({ NamespaceGroup, NAMESPACE_CONSTANT: 1, namespaceHelper: () => null })
+
+    const store = await act(async () => root.render(<namespaceGroup />))
+    expect(store.getState().scene.children[1]).toBeInstanceOf(NamespaceGroup)
+
+    // The constant was not registered, so the element is unknown. React reports a render-phase
+    // throw through the nearest error boundary; whether the render promise itself rejects
+    // depends on React's retry timing, so assert on the boundary, not the promise.
+    let caught: Error | null = null
+    class Boundary extends React.Component<{ children: React.ReactNode }, { hasError: boolean }> {
+      state = { hasError: false }
+      static getDerivedStateFromError() {
+        return { hasError: true }
+      }
+      componentDidCatch(error: Error) {
+        caught = error
+      }
+      render() {
+        return this.state.hasError ? null : this.props.children
+      }
+    }
+
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await act(async () =>
+      root.render(
+        <Boundary>
+          <nAMESPACE_CONSTANT />
+        </Boundary>,
+      ),
+    )
+    errSpy.mockRestore()
+    expect(caught!.message).toMatch(/not part of the THREE namespace/)
   })
 
   it('should render extended elements', async () => {
@@ -271,6 +311,35 @@ describe('renderer', () => {
     expect(scene.children[1].children.length).toBe(0)
     // attaches before presenting
     expect(lifecycle).toStrictEqual(['attach', 'mount'])
+  })
+
+  it('should keep attach fixed until the instance is remounted', async () => {
+    const ref = React.createRef<THREE.Group>()
+
+    function Test({ attach, childKey }: { attach?: string; childKey: string }) {
+      return (
+        <group>
+          <group key={childKey} ref={ref} attach={attach} />
+        </group>
+      )
+    }
+
+    const store = await act(async () => root.render(<Test childKey="one" attach="userData-one" />))
+    // Camera is at [0], rendered content starts at [1]
+    const parent = store.getState().scene.children[1]
+    const child = ref.current
+    expect(parent.userData.one).toBe(child)
+
+    await act(async () => root.render(<Test childKey="one" attach="userData-two" />))
+    expect(parent.userData.one).toBe(child)
+    expect(parent.userData.two).toBeUndefined()
+
+    await act(async () => root.render(<Test childKey="one" />))
+    expect(parent.userData.one).toBe(child)
+
+    await act(async () => root.render(<Test childKey="two" attach="userData-two" />))
+    expect(parent.userData.one).toBeUndefined()
+    expect(parent.userData.two).toBe(ref.current)
   })
 
   it('should update props reactively', async () => {
@@ -800,6 +869,23 @@ describe('renderer', () => {
     expect(store.getState().scene.children[1]).toBeInstanceOf(THREE.Group)
   })
 
+  it('updates a prefixed element after mount', async () => {
+    // <threeLine> mounts as Line once the prefix is stripped. The first prop update used to
+    // re-validate the raw "threeLine" tag and throw "ThreeLine is not part of the THREE namespace",
+    // unmounting the root on any ancestor re-render.
+    function Test({ visible }: { visible: boolean }) {
+      return <threeLine visible={visible} />
+    }
+
+    const store = await act(async () => root.render(<Test visible={true} />))
+    const line = store.getState().scene.children[1] as THREE.Line
+    expect(line).toBeInstanceOf(THREE.Line)
+
+    await act(async () => root.render(<Test visible={false} />))
+    expect(store.getState().scene.children[1]).toBe(line)
+    expect(line.visible).toBe(false)
+  })
+
   // https://github.com/pmndrs/react-three-fiber/pull/3490
   // Tests that instance.children stays in sync with object.children during reorders
   it('should properly handle array of components with changing keys and order', async () => {
@@ -865,6 +951,21 @@ describe('renderer', () => {
     expect(finalUniqueNames.size).toBe(contentChildren().length)
   })
 
+  it('should keep instance children synchronized after a keyed reorder', async () => {
+    const parent = React.createRef<THREE.Group>()
+    const children = (order: string[]) => order.map((name) => <group key={name} name={name} />)
+    const tree = (order: string[]) => <group ref={parent}>{children(order)}</group>
+
+    await act(async () => root.render(tree(['a', 'b'])))
+    await act(async () => root.render(tree(['b', 'a'])))
+
+    const objectOrder = parent.current!.children.map((child) => child.name)
+    const instanceOrder = (parent.current as any).__r3f.children.map((child: any) => child.object.name)
+
+    expect(objectOrder).toEqual(['b', 'a'])
+    expect(instanceOrder).toEqual(objectOrder)
+  })
+
   it('should update scene synchronously with flushSync', async () => {
     let updateSynchronously: (value: number) => void
 
@@ -890,6 +991,140 @@ describe('renderer', () => {
 
     await act(async () => root.render(<TestComponent />))
     await act(async () => updateSynchronously(1))
+  })
+
+  it('should reset removed pierced props on the pierced target', async () => {
+    const ref = React.createRef<THREE.Mesh>()
+
+    function Test(props: any) {
+      return (
+        <mesh ref={ref} {...props}>
+          <boxGeometry />
+          <meshBasicMaterial />
+        </mesh>
+      )
+    }
+
+    await act(async () => root.render(<Test position-x={5} />))
+    expect(ref.current!.position.x).toBe(5)
+
+    await act(async () => root.render(<Test />))
+    expect(ref.current!.position.x).toBe(0)
+    // The reset must not leak a stray leaf-key property onto the object root
+    expect((ref.current as any).x).toBeUndefined()
+
+    // Imperative updates should not get overwritten by unrelated updates now
+    ref.current!.position.x = 3
+
+    await act(async () => root.render(<Test name="updated" />))
+    expect(ref.current!.position.x).toBe(3)
+  })
+
+  it('should respect dispose={null} added after mount', async () => {
+    const dispose = vi.fn()
+
+    const Test = (props: any) => (
+      <mesh
+        {...props}
+        ref={(self: any) => {
+          if (self) self.dispose = dispose
+        }}
+      />
+    )
+
+    await act(async () => root.render(<Test />))
+    await act(async () => root.render(<Test dispose={null} />))
+    await act(async () => root.render(null))
+
+    expect(dispose).not.toHaveBeenCalled()
+  })
+
+  // #3980, test adapted from #3976 (master)
+  it('should request a frame when an object is removed', async () => {
+    const store = await act(async () =>
+      (await root.configure({ frameloop: 'demand' })).render(
+        <group>
+          <mesh />
+        </group>,
+      ),
+    )
+    const invalidate = vi.fn()
+    store.setState({ invalidate })
+
+    // One request for the removed subtree, not one per descendant
+    await act(async () => root.render(null))
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('should request a frame when an object is removed from a portal', async () => {
+    const container = new THREE.Group()
+    const Test = ({ show }: { show: boolean }) => (
+      <>
+        <primitive object={container} />
+        {createPortal(show ? <mesh /> : null, container)}
+      </>
+    )
+
+    const store = await act(async () => (await root.configure({ frameloop: 'demand' })).render(<Test show />))
+    const invalidate = vi.fn()
+    store.setState({ invalidate })
+
+    await act(async () => root.render(<Test show={false} />))
+    expect(invalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it('should not request a frame for objects removed while the root unmounts', async () => {
+    const container = new THREE.Group()
+    const store = await act(async () =>
+      (await root.configure({ frameloop: 'demand' })).render(
+        <>
+          <group />
+          <primitive object={container} />
+          {createPortal(<mesh />, container)}
+        </>,
+      ),
+    )
+    const invalidate = vi.fn()
+    store.setState({ invalidate })
+
+    await act(async () => root.unmount())
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it.each(['demand', 'always'] as const)(
+    'should not warn about a missing scheduler root when a %s root unmounts',
+    async (frameloop) => {
+      const warn = vi.spyOn(console, 'warn')
+      await act(async () => (await root.configure({ frameloop })).render(<group />))
+
+      await act(async () => root.unmount())
+      expect(warn).not.toHaveBeenCalledWith(expect.stringContaining('not found; invalidation ignored'))
+      warn.mockRestore()
+    },
+  )
+
+  it('should apply args changes when followed by an unchanged memoized sibling', async () => {
+    const ref = React.createRef<THREE.Mesh>()
+    const Sibling = React.memo(() => <group name="static" />)
+
+    function Test({ size }: { size: number }) {
+      const material = React.useMemo(() => <meshBasicMaterial />, [])
+      return (
+        <>
+          <mesh ref={ref}>
+            <boxGeometry args={[size, size, size]} />
+            {material}
+          </mesh>
+          <Sibling />
+        </>
+      )
+    }
+
+    await act(async () => root.render(<Test size={1} />))
+    expect((ref.current!.geometry as THREE.BoxGeometry).parameters.width).toBe(1)
+
+    await act(async () => root.render(<Test size={2} />))
+    expect((ref.current!.geometry as THREE.BoxGeometry).parameters.width).toBe(2)
   })
 
   //* Props vs Setters Conflict Resolution Tests ==============================
@@ -924,6 +1159,34 @@ describe('renderer', () => {
 
     // Frameloop should STILL be 'demand' - not reset to 'always'
     expect(store.getState().frameloop).toBe('demand')
+  })
+
+  // Regression for #3752: when the gl/renderer factory is async and slow, overlapping
+  // configure() calls (e.g. a parent re-render mid-init) must not each build a renderer.
+  it('serializes overlapping configure() calls with an async gl factory (#3752)', async () => {
+    const glFactory = vi.fn(async (props: any) => {
+      // Simulate a slow async renderer init so both configures overlap in-flight.
+      await new Promise((resolve) => setTimeout(resolve, 20))
+      return new THREE.WebGLRenderer(props)
+    })
+
+    // An async gl factory makes a WebGLRenderer, which lives on /legacy
+    const root = createLegacyRoot(document.createElement('canvas'))
+    let store: RootStore = null!
+    await act(async () => {
+      // Kick off two configures before the first has finished initializing the renderer.
+      const first = root.configure({ gl: glFactory as any, size: { width: 100, height: 100, top: 0, left: 0 } })
+      const second = root.configure({ gl: glFactory as any, size: { width: 300, height: 300, top: 0, left: 0 } })
+      await Promise.all([first, second])
+      store = root.render(null)
+    })
+
+    // The factory must run exactly once despite two overlapping configures.
+    expect(glFactory).toHaveBeenCalledTimes(1)
+    // The latest configure's size wins after the shared renderer resolves.
+    expect(store.getState().size.width).toBe(300)
+    expect(store.getState().size.height).toBe(300)
+    await act(async () => root.unmount())
   })
 
   it('should preserve setDpr changes from child component across re-configure', async () => {
@@ -1042,6 +1305,32 @@ describe('renderer', () => {
     expect(store.getState().frameloop).toBe('demand')
     // Size should have updated
     expect(store.getState().size.width).toBe(200)
+  })
+
+  //* Unmount ==============================
+
+  // Ported from master #3869 (via port/3869-remount-claim-v10): the teardown, and with it the
+  // disposal of a renderer R3F built, waits until the unmounted tree's effect cleanups have run.
+  it('should tear down after the tree has cleaned up', async () => {
+    const order: string[] = []
+    let dispose!: ReturnType<typeof vi.spyOn>
+    function Test() {
+      const renderer = useThree((state) => state.renderer)
+      React.useEffect(
+        () => () => void order.push(`cleanup:${dispose.mock.calls.length ? 'disposed' : 'live'}`),
+        [renderer],
+      )
+      return null
+    }
+
+    let state!: RootState
+    await act(async () => root.configure({ onCreated: (created) => (state = created) }))
+    await act(async () => root.render(<Test />))
+
+    dispose = vi.spyOn(state.renderer, 'dispose').mockImplementation(() => void order.push('teardown'))
+    await act(async () => root.unmount())
+
+    expect(order).toStrictEqual(['cleanup:live', 'teardown'])
   })
 
   describe('createPortal', () => {
@@ -1264,6 +1553,223 @@ describe('renderer', () => {
       expect(portalSceneActual).toBeDefined()
       expect(portalSceneInUseFrame!.uuid).toBe(portalSceneActual!.uuid)
       expect(portalSceneInUseFrame!.uuid).not.toBe(rootSceneUuid)
+    })
+
+    // Regression for #3751: Portal's setEvents closure must capture only the stable
+    // store setter, not the whole previous portal state, or every replaced state stays
+    // anchored in memory through a setEvents → injectState chain (unbounded leak).
+    it('does not retain stale portal state in setEvents (#3751)', async () => {
+      const container = new THREE.Group()
+      let portalState: RootState = null!
+
+      function PortalProbe() {
+        portalState = useThree()
+        return null
+      }
+
+      const rootStore: RootStore = await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<PortalProbe />, container)}
+          </>,
+        ),
+      )
+
+      const stalePortalState = portalState
+      const staleSet = stalePortalState.set
+
+      // Mutating the parent root store rebuilds the portal state via the inject callback,
+      // replacing portalState with a fresh object.
+      await act(async () => {
+        rootStore.getState().set((state) => ({ size: { ...state.size } }))
+      })
+      expect(portalState).not.toBe(stalePortalState)
+
+      // Poison the *property* on the stale state. The fixed setEvents captured the setter
+      // by value, so it is unaffected; the buggy version looked it up off the retained
+      // injectState at call time and would route through (and throw on) this.
+      stalePortalState.set = (() => {
+        throw new Error('stale portal state setter was retained')
+      }) as RootState['set']
+
+      try {
+        await act(async () => {
+          portalState.setEvents({ enabled: false })
+        })
+        expect(portalState.get().events.enabled).toBe(false)
+      } finally {
+        stalePortalState.set = staleSet
+      }
+    })
+
+    // Regression for the second Portal leak reported on #3760: the subscription to the
+    // parent (previous) root store must be torn down when the portal unmounts. It lives in
+    // a layout effect that returns its unsubscribe; if that subscription is ever moved back
+    // into the useMemo (where the unsubscribe is discarded), every portal mount would pin
+    // its THREE.Scene in the parent store's listener set for good.
+    it('unsubscribes from the parent root store when the portal unmounts', async () => {
+      const container = new THREE.Group()
+
+      // Render the parent tree once (no portal) to obtain the real root store.
+      const rootStore: RootStore = await act(async () => root.render(<primitive object={container} />))
+
+      // Track subscriptions added through the store from here on, and drop them as their
+      // unsubscribe fires, so `live` reflects the currently-attached listeners.
+      const live = new Set<() => void>()
+      const realSubscribe = rootStore.subscribe.bind(rootStore)
+      const subscribeSpy = vi.spyOn(rootStore, 'subscribe').mockImplementation((listener: any) => {
+        const unsub = realSubscribe(listener)
+        live.add(unsub)
+        return () => {
+          live.delete(unsub)
+          unsub()
+        }
+      })
+
+      const baseline = live.size
+
+      // Mount the portal — PortalInner subscribes to the parent store.
+      await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<mesh />, container)}
+          </>,
+        ),
+      )
+      expect(live.size).toBeGreaterThan(baseline)
+
+      // Unmount the portal — the subscription must be cleaned up, not leaked.
+      await act(async () => root.render(<primitive object={container} />))
+      expect(live.size).toBe(baseline)
+
+      subscribeSpy.mockRestore()
+    })
+
+    // A portal's state holds a copy of every parent field. Before, `...injectState` then won on every
+    // later parent change, so fields other than size/events/viewport froze at mount (a later camera,
+    // controls, or an extension's fields such as TSL uniforms).
+    it('follows parent fields that change after the portal mounted', async () => {
+      const container = new THREE.Group()
+      let portalState: RootState = null!
+      const frames: RootState[] = []
+
+      function PortalProbe() {
+        portalState = useThree()
+        useFrame((state) => {
+          frames.push(state)
+        })
+        return null
+      }
+
+      const rootStore: RootStore = await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<PortalProbe />, container)}
+          </>,
+        ),
+      )
+
+      const camera = new THREE.PerspectiveCamera()
+      const controls = new THREE.EventDispatcher() as RootState['controls']
+      await act(async () => rootStore.setState({ camera, controls }))
+
+      expect(portalState.camera).toBe(camera)
+      expect(portalState.controls).toBe(controls)
+      await act(async () => rootStore.getState().advance(1000))
+      expect(frames.at(-1)!.controls).toBe(controls)
+    })
+
+    it('keeps fields the portal overrides through its state prop', async () => {
+      const container = new THREE.Group()
+      const portalCamera = new THREE.PerspectiveCamera()
+      let portalState: RootState = null!
+
+      function PortalProbe() {
+        portalState = useThree()
+        return null
+      }
+
+      const rootStore: RootStore = await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<PortalProbe />, container, { camera: portalCamera })}
+          </>,
+        ),
+      )
+      expect(portalState.camera).toBe(portalCamera)
+
+      await act(async () => rootStore.setState({ camera: new THREE.PerspectiveCamera() }))
+      expect(portalState.camera).toBe(portalCamera)
+    })
+
+    // What drei's <PerspectiveCamera makeDefault> / <OrbitControls makeDefault> do inside a portal
+    // (Hud, RenderTexture, View): set() on the portal's own store. The portal owns those fields from
+    // then on, even when the parent later changes the same field.
+    it('keeps a camera and controls the portal set itself when the parent changes the same fields', async () => {
+      const container = new THREE.Group()
+      let portalState: RootState = null!
+      const portalCamera = new THREE.PerspectiveCamera()
+      const portalControls = new THREE.EventDispatcher() as RootState['controls']
+
+      function PortalProbe() {
+        portalState = useThree()
+        return null
+      }
+
+      const rootStore: RootStore = await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<PortalProbe />, container)}
+          </>,
+        ),
+      )
+
+      await act(async () => portalState.set({ camera: portalCamera, controls: portalControls }))
+
+      // The parent swaps its own default camera and controls afterwards.
+      await act(async () =>
+        rootStore.setState({
+          camera: new THREE.PerspectiveCamera(),
+          controls: new THREE.EventDispatcher() as RootState['controls'],
+        }),
+      )
+      expect(portalState.camera).toBe(portalCamera)
+      expect(portalState.controls).toBe(portalControls)
+
+      // Unrelated parent changes still come through.
+      const renderer = {} as RootState['renderer']
+      await act(async () => rootStore.setState({ renderer }))
+      expect(portalState.renderer).toBe(renderer)
+      expect(portalState.camera).toBe(portalCamera)
+    })
+
+    it('always keeps its own scene, whatever the parent does', async () => {
+      const container = new THREE.Group()
+      let portalState: RootState = null!
+
+      function PortalProbe() {
+        portalState = useThree()
+        return null
+      }
+
+      const rootStore: RootStore = await act(async () =>
+        root.render(
+          <>
+            <primitive object={container} />
+            {createPortal(<PortalProbe />, container)}
+          </>,
+        ),
+      )
+      const portalScene = portalState.scene
+      expect(portalScene).not.toBe(rootStore.getState().scene)
+
+      await act(async () => rootStore.setState({ scene: new THREE.Scene() }))
+      expect(portalState.scene).toBe(portalScene)
     })
   })
 })

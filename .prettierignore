@@ -6,3 +6,8 @@ packages/fiber/react-reconciler/
 *.gltf
 *.mdx
 pnpm-lock.yaml
+# WITH_GENESYS
+# Copies of the monorepo publish scripts, kept byte-identical to them
+scripts/publish-version.ts
+scripts/bump-package-version.ts
+# !WITH_GENESYS

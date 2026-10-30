@@ -1,78 +1,18 @@
 import type * as React from 'react'
 import type * as THREE from 'three'
-import type { WebGPURenderer, CanvasTarget, Node, StorageTexture, Data3DTexture } from 'three/webgpu'
+import type { WebGPURenderer, CanvasTarget } from 'three/webgpu'
 import type { StoreApi } from 'zustand'
 import type { UseBoundStoreWithEqualityFn } from 'zustand/traditional'
 import type { DomEvent, EventManager, PointerCaptureTarget, ThreeEvent, VisibilityEntry } from './events'
 import type { ThreeCamera } from './utils'
 import type { SchedulerApi } from './scheduler'
-
-//* Buffer Types (useBuffers) ========================================
-
-/**
- * Buffer-like types for GPU compute and storage operations.
- * Includes raw CPU arrays, Three.js buffer attributes, and TSL buffer nodes.
- *
- * @example
- * ```tsx
- * const { positions, velocities } = useBuffers(() => ({
- *   positions: instancedArray(count, 'vec3'),       // StorageBufferNode
- *   velocities: new Float32Array(count * 3),        // TypedArray
- * }), 'particles')
- * ```
- */
-export type BufferLike =
-  | Float32Array
-  | Uint32Array
-  | Int32Array
-  | Float64Array
-  | Uint8Array
-  | Int8Array
-  | Uint16Array
-  | Int16Array
-  | THREE.BufferAttribute // Base class for all buffer attributes
-  | Node // TSL buffer nodes (instancedArray, storage)
-
-/** Flat record of buffer-like values (no nested scopes) */
-export type BufferRecord = Record<string, BufferLike>
-
-/**
- * Buffer store that can contain both root-level buffers and scoped buffer objects.
- * Structure: { positions: Float32Array, particles: { vel: StorageBufferNode } }
- */
-export type BufferStore = Record<string, BufferLike | BufferRecord>
-
-//* Storage Types (useGPUStorage) ========================================
-
-/**
- * GPU storage types for texture-based storage operations.
- * Includes Three.js storage textures and TSL storage texture nodes.
- *
- * @example
- * ```tsx
- * const { heightMap } = useGPUStorage(() => ({
- *   heightMap: new StorageTexture(512, 512),
- * }), 'terrain')
- * ```
- */
-export type StorageLike =
-  | StorageTexture // GPU storage texture
-  | Data3DTexture // 3D texture (can be used as storage)
-  | Node // TSL storage texture nodes (storageTexture)
-
-/** Flat record of storage-like values (no nested scopes) */
-export type StorageRecord = Record<string, StorageLike>
-
-/**
- * Storage store that can contain both root-level storage and scoped storage objects.
- * Structure: { heightMap: StorageTexture, terrain: { normal: StorageTextureNode } }
- */
-export type StorageStore = Record<string, StorageLike | StorageRecord>
+import type { ForRegisteredRenderer, R3FRenderer, R3FRendererSupport } from './register'
 
 //* Renderer Types ========================================
 
-/** Default renderer type - union of WebGL and WebGPU renderers */
-export type R3FRenderer = THREE.WebGLRenderer | WebGPURenderer
+// `R3FRenderer` -- the type of `state.renderer` -- is the union of both renderers unless the app
+// registered one (types/register.d.ts). Re-exported here for the many places that import it.
+export type { R3FRenderer }
 
 //* Core Store Types ========================================
 
@@ -166,41 +106,93 @@ export interface InternalState {
   subscribe: (callback: React.RefObject<RenderCallback>, priority: number, store: RootStore) => () => void
   /** Internal renderer storage - use state.renderer or state.gl to access */
   actualRenderer: R3FRenderer
+  /**
+   * The renderer support `configure()` loaded for this root: the three namespace of that flavour
+   * (JSX constructors, core's classes) and the renderer-specific classes core needs by name.
+   * Selected once, from the entry's provider, and copied into portals with the rest of `internal`.
+   */
+  support: R3FRendererSupport
+  /**
+   * Releases this root's lease on its renderer. The last release disposes a renderer R3F created;
+   * a renderer passed in as an instance is never disposed by R3F.
+   */
+  releaseRenderer?: () => void | Promise<void>
   /** Global scheduler reference (for useFrame hook) */
   scheduler: SchedulerApi | null
+  /**
+   * Replaces `renderer.render(scene, camera)` in the default render job when set. Set it with
+   * `setRenderOverride(store, fn)`; the job keeps its fps throttle, error handling and user
+   * render-phase takeover. Used by `useRenderPipeline`.
+   */
+  renderOverride?: (() => void) | null
   /** This root's unique ID in the global scheduler */
   rootId?: string
+  /** Scheduler id reserved when a primary publishes its renderer, before root jobs are installed. */
+  pendingRootId?: string
+  /** Default scheduler predecessor when borrowing a primary renderer. */
+  sharedAfter?: string
   /** Function to unregister this root from the global scheduler */
   unregisterRoot?: () => void
+  /** Function to stop following devicePixelRatio changes */
+  unwatchDpr?: () => void
   /** Container for child attachment (scene for root, original container for portals) */
   container?: THREE.Object3D
   /**
-   * CanvasTarget for multi-canvas WebGPU rendering.
-   * Created for all WebGPU canvases to support renderer sharing.
+   * The CanvasTarget this root sizes and renders through.
+   *
+   * A primary (`<Canvas id>`) owns the renderer's default target -- the one three itself built
+   * around the canvas element -- so sizing it is sizing the renderer. A secondary owns a target
+   * R3F created for its own element. Either way there is exactly one target per canvas element,
+   * and the canvas-target job makes it the renderer's active one before this root renders.
+   * Absent on WebGL and on a WebGPU canvas that is neither a primary nor sharing, where the renderer
+   * is sized directly.
    * @see https://threejs.org/docs/#api/en/renderers/common/CanvasTarget
    */
   canvasTarget?: CanvasTarget
   /**
+   * Set when this root's canvas target has been resized and the backend's cached render pass
+   * descriptor (which holds a depth-stencil view built once per canvas) is therefore stale.
+   *
+   * Flushed by the canvas-target job in the `start` phase, which is the only place this root's
+   * target is guaranteed to be the renderer's active one — `backend.updateSize()` operates on
+   * whatever `getCanvasTarget()` returns, so calling it from the resize subscription would
+   * invalidate some other canvas's descriptor instead.
+   *
+   * @see https://github.com/pmndrs/react-three-fiber/issues/3847
+   */
+  canvasTargetSizeDirty?: boolean
+  /**
    * Whether multi-canvas rendering is active.
-   * True when any canvas uses `target` prop to share a renderer.
+   * True on a `<Canvas primary>` once another canvas shares its renderer, and on that canvas.
    * When true, setCanvasTarget is called before each render.
    */
   isMultiCanvas?: boolean
   /**
-   * Whether this canvas is a secondary canvas sharing another's renderer.
-   * True when `target` prop is used.
+   * Whether this canvas is a secondary canvas sharing another's renderer: it found a
+   * `<Canvas primary>` (automatically, or through `share="id"`) and borrows its renderer.
    */
   isSecondary?: boolean
   /**
-   * The id of the primary canvas this secondary canvas targets.
-   * Only set when isSecondary is true.
+   * The id of the primary canvas this secondary canvas shares.
+   * Only set when isSecondary is true and the primary has an `id`.
    */
   targetId?: string
   /**
-   * Function to unregister this primary canvas from the registry.
-   * Only set when this canvas has an `id` prop.
+   * This secondary stopped sharing because the primary's renderer fell back to its
+   * WebGL2 backend (#3965): it owns the renderer it constructed, so it is not
+   * `isSecondary` (which marks a canvas borrowing another's renderer).
+   */
+  sharedRendererFallback?: boolean
+  /**
+   * Function to withdraw this primary canvas from the registry.
+   * Only set on a `<Canvas primary>`.
    */
   unregisterPrimary?: () => void
+  /**
+   * Function to stop tracking this canvas as one that built its own WebGPU renderer while no primary
+   * existed (for the late-primary warning).
+   */
+  untrackStandalone?: () => void
   /** Whether canvas dimensions are forced to even numbers */
   forceEven?: boolean
 }
@@ -218,17 +210,22 @@ export interface RootState {
   /** Get current state */
   get: StoreApi<RootState>['getState']
   /**
-   * Reference to the authoritative store for shared TSL resources (uniforms, nodes, etc).
+   * The store of the canvas that owns this root's renderer.
    * - For primary/independent canvases: points to its own store (self-reference)
    * - For secondary canvases: points to the primary canvas's store
+   * - Portals copy it from their parent
    *
-   * Hooks like useNodes/useUniforms should read from primaryStore to ensure
-   * consistent shared state across all canvases sharing a renderer.
+   * Anything shared per renderer rather than per canvas (e.g. @react-three/tsl's resources)
+   * resolves through it.
    */
   primaryStore: RootStore
   /** @deprecated Use `renderer` instead. The instance of the renderer (typed as WebGLRenderer for backwards compat) */
-  gl: THREE.WebGLRenderer
-  /** The renderer instance - type depends on entry point (WebGPU, Legacy, or union for default) */
+  gl: ForRegisteredRenderer<WebGPURenderer, THREE.WebGLRenderer, THREE.WebGLRenderer>
+  /**
+   * The renderer instance. Both renderers unless the app registered one
+   * (`declare module '@react-three/fiber' { interface Register { renderer: 'webgpu' } }`), or the
+   * entry decides it (`/webgpu`, `/legacy`).
+   */
   renderer: R3FRenderer
   /** Inspector of the webGPU Renderer. Init in the canvas */
   inspector: any // Inspector type from three/webgpu
@@ -280,28 +277,16 @@ export interface RootState {
   setSize: (width?: number, height?: number, top?: number, left?: number) => void
   /** Shortcut to manual setting the pixel ratio */
   setDpr: (dpr: Dpr) => void
-  /** Shortcut to setting frameloop flags */
-  setFrameloop: (frameloop: Frameloop) => void
+  /** Shortcut to setting frameloop flags. No args resets to 'always'. */
+  setFrameloop: (frameloop?: Frameloop) => void
   /** Set error state to propagate to error boundary */
   setError: (error: Error | null) => void
   /** Current error state (null when no error) */
   error: Error | null
-  /** Global TSL uniform nodes - root-level uniforms + scoped sub-objects. Use useUniforms() hook */
-  uniforms: UniformStore
-  /** Global TSL nodes - root-level nodes + scoped sub-objects. Use useNodes() hook */
-  nodes: Record<string, any>
-  /** Global TSL buffer nodes - root-level buffers + scoped sub-objects. Use useBuffers() hook */
-  buffers: BufferStore
-  /** Global GPU storage (textures, etc.) - root-level storage + scoped sub-objects. Use useGPUStorage() hook */
-  gpuStorage: StorageStore
-  /** Global TSL texture nodes - use useTextures() hook for operations */
-  textures: Map<string, any>
-  /** WebGPU RenderPipeline instance - use useRenderPipeline() hook */
-  renderPipeline: any | null // THREE.PostProcessing (will be THREE.RenderPipeline in future Three.js release)
-  /** Global TSL pass nodes for render pipeline - use useRenderPipeline() hook */
-  passes: Record<string, any>
-  /** Internal version counter for HMR - incremented by rebuildNodes/rebuildUniforms to bust memoization */
-  _hmrVersion: number
+  /** Global Texture registry (key → Texture, usually keyed by URL) - use useTextures() hook for access + lifecycle */
+  textures: Map<string, THREE.Texture>
+  /** Internal: refcount per texture key, driven by mounted useTexture consumers (registry enrollment is on by default) */
+  _textureRefs: Map<string, number>
   /** Internal: whether setSize() has taken ownership of canvas dimensions */
   _sizeImperative: boolean
   /** Internal: stored size props from Canvas for reset functionality */
@@ -318,7 +303,7 @@ export interface RootState {
   internal: InternalState
   // flags for triggers
   // if we are using the webGl renderer, this will be true
-  isLegacy: boolean
+  isLegacy: ForRegisteredRenderer<false, true, boolean>
   // regardless of renderer, if the system supports webGpu, this will be true
   webGPUSupported: boolean
   //if we are on native

@@ -1,10 +1,94 @@
 # @react-three/eslint-plugin
 
+## 1.0.0-alpha.6
+
+### Major Changes
+
+- `configs.recommended` and `configs.all` are flat configs, and the default export is the plugin
+  object for `eslint.config.js`. eslintrc users switch to `plugin:@react-three/legacy-recommended` /
+  `plugin:@react-three/legacy-all`. `eslint` moved to `peerDependencies`
+  (`^8.57.0 || ^9.0.0 || ^10.0.0`).
+
+### Minor Changes
+
+- New rules `no-fast-state` (state setters and store setters called in the frame loop) and
+  `prefer-useloader` (loaders called in effects instead of `useLoader` / `useTexture`), both in
+  `recommended`. The frame loop rules now see every per-frame callback: `useFrame` through an alias
+  or namespace, callbacks passed by reference, and `addEffect`, `addAfterEffect`,
+  `setRenderOverride` and the scheduler's `register`.
+
+- New rule `prefer-local-nodes-deps`, in `recommended`. It flags a `useLocalNodes` call with an
+  inline creator and no dependency array, which rebuilds the node graph on every render. When the
+  creator reads values from the component, it names them and points to a uniform first; otherwise
+  it suggests `[]`.
+
+- New `migration` config (`configs.migration`, eslintrc `plugin:@react-three/legacy-migration`) for
+  upgrading from v9, most of it autofixable: `no-deprecated-gl`, `no-frame-clock`,
+  `no-numeric-frame-priority`, `no-removed-canvas-props`, `no-onupdate-prop`, `no-removed-imports`,
+  `no-deprecated-loop-globals` and `prefer-canvas-background`.
+
+- New rules in `recommended`: `no-unstable-args`, `no-inline-node-props`,
+  `no-deferred-resource-read`, `no-creator-side-effects`, `no-invalid-dispose`, `no-nested-fromref`
+  and `canvas-entry-compat`. `no-fast-state` also checks `onPointerMove` and `onWheel` handlers, and
+  `prefer-local-nodes-deps` checks creators passed by reference.
+
+- Rule doc links point at the `v10` branch, where the rule docs live until v10 merges to `master`.
+
+## 1.0.0-alpha.5
+
+### Patch Changes
+
+- `no-clone-in-loop` only flags `.clone()` calls. Its selector matched any identifier named
+  `clone` inside a `useFrame` body, so a loop variable named `clone` used as `clone.position`
+  was reported with no clone() invocation anywhere.
+
+## 1.0.0-alpha.4
+
+### Patch Changes
+
+- No rule changes. Released alongside `@react-three/fiber@10.0.0-alpha.4` to keep the prerelease
+  train aligned. See [Fiber's changelog](../fiber/CHANGELOG.md) and the
+  [full Alpha 4 notes](../../CHANGELOG-ALPHA.md#1000-alpha4).
+
+## 1.0.0-alpha.3
+
+### Patch Changes
+
+- No rule changes. Released alongside `@react-three/fiber@10.0.0-alpha.3` to keep the alpha line in
+  step; see [that package's changelog](../fiber/CHANGELOG.md) for what changed, and
+  [`CHANGELOG-ALPHA.md`](../../CHANGELOG-ALPHA.md#1000-alpha3) for full detail.
+
+  Note this package is versioned on its **own 1.x line**, not fiber's 10.x — matching alpha numbers
+  denote the same release train, not the same version.
+
+- Changelog restructured: the alpha.2 entries had been collapsed into a single run-on bullet.
+
 ## 1.0.0-alpha.2
 
 ### Major Changes
 
-- 1692803: Features Canvas Size Control - Added width and height props to Canvas for explicit resolution control - Enhanced setSize() API with square shorthand and reset capability - Ownership model: imperative setSize(w, h) takes control until setSize() resets ScopedStore for Type-Safe Uniform/Node Access - New createScopedStore<T>() wrapper for TypeScript-friendly access to uniforms/nodes - Eliminates manual casting in creator functions - New exports: ScopedStoreType<T>, CreatorState HMR Support for TSL Hooks - Automatic Hot Module Replacement for WebGPU TSL hooks - Canvas detects Vite/webpack HMR events and rebuilds nodes/uniforms - New hmr prop on Canvas, rebuildNodes(), rebuildUniforms() utils Bug Fixes - Fixed useNodes() and useUniforms() reader modes not updating when store changes - Fixed usePostProcessing callbacks not re-running after HMR - Fixed absolute Windows paths in bundled type declarations (FiberRoot now defined locally) - Fixed eslint-plugin codegen not awaiting prettier format Maintenance - Migrated to ESLint 9 flat config - Updated Vite to v7, Prettier to v3, Husky to v9, lint-staged to v16 - Converted verify-bundles.js to ES modules ---
+- 1692803: Aggregate alpha.2 changeset, applied across all four published packages. The entries
+  below are `@react-three/fiber` changes — see that package's changelog for the authoritative list.
+
+  **Features**
+  - Canvas Size Control: `width`/`height` props on Canvas for explicit resolution control;
+    `setSize()` gains a square shorthand and reset; imperative `setSize(w, h)` takes ownership
+    until `setSize()` resets it
+  - ScopedStore for type-safe uniform/node access: `createScopedStore<T>()` removes manual casting
+    in creator functions; new `ScopedStoreType<T>` and `CreatorState` exports
+  - HMR support for TSL hooks: Canvas detects Vite/webpack HMR and rebuilds nodes/uniforms; new
+    `hmr` prop, `rebuildNodes()` and `rebuildUniforms()` utils
+
+  **Bug Fixes**
+  - `useNodes()` / `useUniforms()` reader modes not updating when the store changes
+  - `usePostProcessing` callbacks not re-running after HMR
+  - Absolute Windows paths in bundled type declarations (`FiberRoot` now defined locally)
+  - eslint-plugin codegen not awaiting prettier format
+
+  **Maintenance**
+  - Migrated to ESLint 9 flat config
+  - Updated Vite to v7, Prettier to v3, Husky to v9, lint-staged to v16
+  - Converted `verify-bundles.js` to ES modules
 
 ## 0.2.0-alpha.1
 

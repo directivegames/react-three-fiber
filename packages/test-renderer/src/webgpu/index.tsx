@@ -1,47 +1,37 @@
 /**
  * @fileoverview WebGPU Entry Point - Full WebGPU Support with Hooks
  *
- * Use this entry point when testing applications that use:
- *   import { Canvas, useUniforms, useNodes } from '@react-three/fiber/webgpu'
+ * Deprecated with `@react-three/fiber/webgpu`, and removed with it in the first v10 beta: the default
+ * entry (`@react-three/test-renderer`) now mocks WebGPU too.
+ *
+ * Use this entry point when testing applications built on @react-three/fiber/webgpu.
  *
  * This entry provides:
  * - WebGPU context mocking for Node.js tests
- * - All WebGPU-specific hooks for testing TSL uniforms and nodes
- * - Automatic THREE extension with node materials
+ * - Node materials as JSX elements (the /webgpu entry resolves them from three/webgpu)
+ *
+ * The TSL hooks (useUniforms, useNodes, ...) live in @react-three/tsl; import them from there in
+ * tests as in app code.
  *
  * Usage:
- *   import ReactThreeTestRenderer, { useUniform, useNodes } from '@react-three/test-renderer/webgpu'
+ *   import ReactThreeTestRenderer from '@react-three/test-renderer/webgpu'
+ *   import { useUniforms } from '@react-three/tsl'
  */
 
-import * as THREE from 'three/webgpu'
-import { extend, _roots as mockRoots, createRoot, reconciler, act } from '@react-three/fiber/webgpu'
-
-// Import WebGPU hooks directly from fiber source for Jest compatibility
-import { useUniform, type UniformValue } from '../../../fiber/src/webgpu/hooks/useUniform'
+import { act } from 'react'
+// All WebGPU hooks come from fiber's public entry, never from its source tree. Importing via
+// relative `../../fiber/src/...` paths pulled fiber's internal `#types` alias into this package's
+// bundle — unresolvable for consumers — and bundled a second copy of hooks whose module-level
+// scoped stores must be shared with the fiber instance under test.
 import {
-  useUniforms,
-  removeUniforms,
-  clearScope,
-  clearRootUniforms,
-  type UniformCreator,
-} from '../../../fiber/src/webgpu/hooks/useUniforms'
-import {
-  useNodes,
-  useLocalNodes,
-  removeNodes,
-  clearNodeScope,
-  clearRootNodes,
-  type TSLNode,
-  type NodeRecord,
-  type NodeCreator,
-  type LocalNodeCreator,
-} from '../../../fiber/src/webgpu/hooks/useNodes'
-import {
+  _roots as mockRoots,
+  createRoot,
+  reconciler,
   useTextures,
   type TextureEntry,
   type TextureNode,
   type UseTexturesReturn,
-} from '../../../fiber/src/webgpu/hooks/useTextures'
+} from '@react-three/fiber/webgpu'
 
 import { mockWebGPU, unmockWebGPU } from '../WebGPUContext'
 import { createTestRenderer } from '../createRenderer'
@@ -54,12 +44,10 @@ mockWebGPU()
 //* Initialize Test Renderer ==============================
 
 const renderer = createTestRenderer({
-  THREE,
   createRoot,
   mockRoots,
   reconciler,
   act,
-  extend,
   mode: 'webgpu',
 })
 
@@ -70,36 +58,11 @@ export const { create } = renderer
 export { act, waitFor }
 export type { WaitOptions }
 
-// WebGPU-specific hooks (re-exported from fiber/webgpu)
-export {
-  // Uniforms
-  useUniform,
-  useUniforms,
-  removeUniforms,
-  clearScope,
-  clearRootUniforms,
-  // Nodes
-  useNodes,
-  useLocalNodes,
-  removeNodes,
-  clearNodeScope,
-  clearRootNodes,
-  // Textures
-  useTextures,
-}
+// Texture registry hook (re-exported from fiber/webgpu)
+export { useTextures }
 
-// WebGPU-specific types
-export type {
-  UniformCreator,
-  UniformValue,
-  TSLNode,
-  NodeRecord,
-  NodeCreator,
-  LocalNodeCreator,
-  TextureEntry,
-  TextureNode,
-  UseTexturesReturn,
-}
+// Texture types
+export type { TextureEntry, TextureNode, UseTexturesReturn }
 
 // Mock utilities (for advanced use cases)
 export { mockWebGPU, unmockWebGPU }

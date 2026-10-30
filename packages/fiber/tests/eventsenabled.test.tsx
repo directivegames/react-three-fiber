@@ -1,17 +1,10 @@
 import { vi } from 'vitest'
 import * as React from 'react'
-import * as THREE from '#three'
+import * as THREE from 'three'
 import { render, fireEvent } from '@testing-library/react'
-import { Canvas, extend, useThree } from '../src/index'
+import { Canvas, extend, useThree } from '../src/legacy'
 
-async function act<T>(fn: () => T | Promise<T>) {
-  const value = await fn()
-  // Wait for R3F's initialization and frame loop
-  await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(() => res(null))))
-  return value
-}
-
-extend(THREE as any)
+import { act } from './utils/act'
 
 const getContainer = () => document.querySelector('canvas') as HTMLCanvasElement
 

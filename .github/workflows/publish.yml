@@ -74,7 +74,6 @@ jobs:
           fi
           "$RUNNER_TEMP/bump-cli/node_modules/.bin/tsx" scripts/bump-package-version.ts "${ARGS[@]}"
       # !WITH_GENESYS
-
       - name: Build package
         run: pnpm --filter @gnsx/react-three-fiber build
 

@@ -1,0 +1,139 @@
+---
+title: TSL HMR
+description: How react-three-fiber refreshes TSL state on hot reload - what rebuilds automatically, what does not, and how to rebuild manually.
+nav: 20
+---
+
+v10 includes automatic Hot Module Replacement (HMR) support for the WebGPU TSL hooks. When you save changes to files containing TSL node, uniform, buffer, or storage definitions, R3F refreshes the affected state without a full page reload.
+
+The `Canvas` component detects HMR events from Vite or webpack, invalidates the TSL resource caches, and bumps an internal HMR version on R3F state, which re-runs every creator hook.
+
+```tsx
+// Just works - save your file and see changes immediately
+const { wobble } = useNodes(() => ({
+  wobble: sin(time.mul(2)), // change to mul(5), save, see the update
+}))
+
+const { uColor } = useUniforms({
+  uColor: '#ff0000', // change the color, save, see the update
+})
+```
+
+## What Rebuilds on HMR
+
+Every TSL hook re-runs when the HMR version is bumped:
+
+| Hook                          | Rebuilds on HMR | How                                |
+| ----------------------------- | --------------- | ---------------------------------- |
+| `useNodes` / `useLocalNodes`  | Yes             | Re-runs creator                    |
+| `useUniforms` / `useUniform`  | Yes             | Re-runs creator                    |
+| `useBuffers`                  | Yes             | Re-runs creator                    |
+| `useGPUStorage`               | Yes             | Re-runs creator                    |
+| `useRenderPipeline`           | Yes             | Re-runs callbacks, keeps scene pass |
+
+`useLocalNodes` also rebuilds because it subscribes to the HMR version directly, alongside its `uniforms`/`nodes`/`textures` triggers - in every mode, including `useLocalNodes(creator, [])`. The dependency array only governs ordinary component renders (see [TSL Hooks](./tsl-hooks#dependency-array)).
+
+## Rebuild Guarantees
+
+A rebuild — whether from a hot update or a manual `rebuild*` call — is **atomic** from a reader's point of view:
+
+- The shared maps are never emptied. Readers keep the previous generation of nodes/uniforms until the re-run creators commit the new one, then see a single swap from old-complete to new-complete. A reader can never observe an empty or half-rebuilt scope (which would strip `*Node` props off materials mid-reload).
+- Creators never write to the store during render. New entries are registered in React's commit phase, so a rebuild can't interrupt other components mid-render.
+- Reuse is generation-aware. After an invalidation, previously cached entries can't be re-adopted into the new generation — every creator produces fresh resources, no matter how re-runs interleave (StrictMode double-invokes, multiple canvases sharing a `primaryStore`, and so on).
+
+Two consequences worth knowing:
+
+- **Removed creators leave their last generation in place.** If an edit deletes a creator component (or a whole scope), the old entries stay visible to readers until something re-registers the scope or you call `clearNodes`/`removeNodes`. During a hot reload, last-good data beats an empty scene.
+- **Captured references go stale across rebuilds.** A rebuild replaces uniform/node objects. Code that reads through the hooks each render picks up the new generation automatically, but a long-lived closure that captured a uniform object directly (for example a `useFrame` callback or an external library callback holding `uTime` from an old generation) keeps writing to the replaced object. Prefer reading through the hook, or re-capture inside the component so the closure refreshes with the rebuild.
+
+## Effects Must Be Re-Run Safe
+
+Fast Refresh re-runs your components' effects on every hot update, while R3F's reconciler correctly keeps the underlying three.js objects alive. An effect that mutates a reconciler-managed object must therefore be idempotent:
+
+```tsx
+// ❌ accumulates 90° per hot update — after one edit the plane faces away
+useEffect(() => {
+  geometryRef.current?.rotateX(-Math.PI / 2)
+}, [])
+
+// ✅ guard per instance, safe to re-run
+useEffect(() => {
+  const geometry = geometryRef.current
+  if (geometry && !geometry.userData.rotated) {
+    geometry.userData.rotated = true
+    geometry.rotateX(-Math.PI / 2)
+  }
+}, [])
+```
+
+Where possible, prefer declarative props (`rotation` on the mesh) or bake transforms at creation time instead of mutating in effects.
+
+## useRenderPipeline on HMR
+
+`useRenderPipeline` re-runs its `setupCB`/`mainCB` after every hot update in the app, once the other TSL hooks have registered their fresh generation, so the graph picks up both your edits and the new uniform objects. It keeps the pipeline and scene pass and replaces only the graph built on them. The remount Fast Refresh does on the owning component keeps the pipeline too; a reset of that component (after adding or removing a hook, or `// @refresh reset`) builds a new pipeline and frees the old one.
+
+To re-run the callbacks yourself, against a fresh scene pass, call `rebuild()`:
+
+```tsx
+function RebuildButton() {
+  const { rebuild } = useRenderPipeline()
+  return <button onClick={rebuild}>Rebuild Effects</button>
+}
+```
+
+For values that change at runtime, drive them through uniforms rather than closure values. See [Render Pipeline](./render-pipeline#hmr).
+
+## Disabling HMR
+
+If you need to turn off automatic refresh (rare), use the `hmr` prop:
+
+```tsx
+<Canvas hmr={false}>{/* HMR won't auto-refresh TSL state */}</Canvas>
+```
+
+## Manual Rebuild
+
+Each creator hook returns a `rebuild*` util that invalidates its cache and bumps the HMR version to force re-creation (with the same atomic-swap guarantees as automatic HMR). Pass a scope name to rebuild a single scope, `'root'` for root only, or no argument for everything. Other scopes are untouched — their entries keep their identity.
+
+```tsx
+const { rebuildNodes } = useNodes(() => ({ wobble: sin(time.mul(2)) }))
+const { rebuildUniforms } = useUniforms({ uColor: '#ff0000' })
+const { rebuildBuffers } = useBuffers(() => ({ positions: instancedArray(count, 'vec3') }))
+const { rebuildStorage } = useGPUStorage(() => ({ heightMap: new StorageTexture(512, 512) }))
+
+rebuildNodes() // all nodes
+rebuildNodes('player') // only the 'player' scope
+rebuildUniforms()
+rebuildBuffers('particles')
+rebuildStorage()
+```
+
+## Global Rebuild Functions
+
+For custom HMR handlers or dev tooling, standalone rebuild functions are exported. They require the R3F store reference:
+
+```tsx
+import { rebuildAllNodes, rebuildAllUniforms, rebuildAllBuffers, rebuildAllStorage } from '@react-three/tsl'
+
+rebuildAllNodes(store)
+rebuildAllUniforms(store)
+rebuildAllBuffers(store)
+rebuildAllStorage(store)
+```
+
+## Reader Reactivity
+
+Reader-mode hooks subscribe to store changes, so they update reactively when nodes/uniforms change elsewhere (including after an HMR-triggered rebuild):
+
+```tsx
+const allNodes = useNodes()
+const playerNodes = useNodes('player')
+const allUniforms = useUniforms()
+const playerUniforms = useUniforms('player')
+```
+
+## Related
+
+- [TSL Hooks](./tsl-hooks) - the `rebuild*` utils on each hook
+- [Render Pipeline](./render-pipeline) - why pipeline callbacks skip HMR
+- [Compute (Buffers & Storage)](./compute) - rebuild for buffers and storage

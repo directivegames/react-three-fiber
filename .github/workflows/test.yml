@@ -1,8 +1,12 @@
 name: Test
 on:
   push:
+    # Both active release lines. `v10` matters as much as `master`: PR checks verify a PR's *head*,
+    # not the result of merging it, and a PR head can lag behind the branch it points at -- so a
+    # merge can land content no run ever saw. Verifying the branch after the merge catches that.
     branches:
       - 'master'
+      - 'v10'
   pull_request: {}
 jobs:
   build:
@@ -18,7 +22,7 @@ jobs:
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
@@ -26,7 +30,7 @@ jobs:
           run_install: false
 
       - name: Use Node 22
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: 'pnpm'
@@ -42,14 +46,31 @@ jobs:
       - name: Build
         run: pnpm run build
 
+      # Keep CI in lockstep with the local `pnpm run ci` gate (see docs/development/TESTING.md
+      # → Local ↔ CI parity). These run locally but were previously CI-only gaps.
+      - name: Verify tree-shaking
+        run: pnpm run verify-treeshake
+
+      - name: Verify types
+        run: pnpm run verify-types
+
       - name: Check types
         run: pnpm run typecheck
 
       - name: Check lint
         run: pnpm run eslint
 
-      - name: Jest run
+      - name: Test (with coverage)
         run: pnpm run dev && pnpm run test
+
+      - name: Upload coverage report
+        if: ${{ matrix.react-version == 'latest' }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage
+          path: coverage/
+          if-no-files-found: warn
+          retention-days: 14
 
       - name: Report Fiber size
         run: pnpm run analyze-fiber
@@ -59,3 +80,70 @@ jobs:
 
       - name: Check formatting
         run: pnpm run format
+
+  # Tier 3 (docs/development/TESTING.md): R3F against a real WebGPU device, headless. Dawn runs in
+  # Node through vitest-environment-webgpu-node; the runner has no GPU, so it draws on Mesa's
+  # software Vulkan driver (lavapipe).
+  gpu:
+    name: Headless WebGPU tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      - name: Install Mesa's software Vulkan driver
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Use Node 22
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: 'pnpm'
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Test (headless WebGPU)
+        run: pnpm run test:gpu
+
+      # A screenshot that does not match its baseline leaves <name>.actual.png and <name>.diff.png
+      # beside it
+      - name: Upload screenshot diffs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v5
+        with:
+          name: gpu-screenshots
+          path: packages/**/tests/gpu/**/__screenshots__/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  docs-checks:
+    name: Docs checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v5
+
+      # Enforce the readme-stub contract: every readme that sits next to source is a
+      # thin pointer to the canonical docs, never a second copy of them (the "drift
+      # rule"). Docs that drift are worse than no docs -- they get believed.
+      - name: Assert source readmes stay thin pointers
+        run: |
+          fail=0
+          while IFS= read -r f; do
+            if ! grep -q "Full documentation:" "$f"; then
+              echo "::error file=$f::source readme must carry a 'Full documentation:' pointer to docs/ or docs.pmnd.rs"
+              fail=1
+            fi
+            lines=$(wc -l < "$f")
+            if [ "$lines" -gt 25 ]; then
+              echo "::error file=$f::source readme exceeds the 25-line stub budget ($lines lines) — move the content into docs/ and link to it"
+              fail=1
+            fi
+          done < <(find packages/*/src -iname 'readme.md')
+          exit $fail

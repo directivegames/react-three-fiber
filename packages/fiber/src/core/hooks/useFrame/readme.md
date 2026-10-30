@@ -1,11 +1,16 @@
-# Frame Loop Documentation
+# Frame Loop
 
-## Start Here
+`useFrame`, the scheduler, phases, fps throttling, pause/resume, render takeover, and demand mode.
 
-- **[Overview](./readmes/frame-loop-overview.md)** - Architecture and quick start
+```ts
+import { useFrame, invalidate, advance, getScheduler } from '@react-three/fiber'
+```
 
-## API Reference
+| Export         | What it does                                                          |
+| -------------- | --------------------------------------------------------------------- |
+| `useFrame`     | Run a callback each frame — phase ordering, fps throttling, pause     |
+| `getScheduler` | The global singleton — phases, roots, jobs, loop control, manual step |
+| `invalidate`   | Request a frame in demand mode                                        |
+| `advance`      | Step the loop manually in `frameloop="never"`                         |
 
-- **[useFrame Hook](./readmes/useFrame.md)** - Full hook API, options, examples, best practices
-- **[Scheduler](./readmes/scheduler.md)** - Advanced scheduler control, phase management
-- **[Utilities](./readmes/frame-loop-api.md)** - `invalidate()`, `advance()`, legacy API migration
+📖 **Full documentation:** https://docs.pmnd.rs/react-three-fiber/frame-loop
