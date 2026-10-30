@@ -60,6 +60,11 @@ export default defineBuildConfig({
   },
   // Note: react-reconciler is NOT external - we bundle our patched ESM version
   externals: [
+    // WITH_GENESYS
+    // unbuild treats the package's own name as external. The fork publishes as @gnsx/react-three-fiber,
+    // so the declarations' self-references to @react-three/fiber (the name consumers import) would be bundled
+    '@react-three/fiber',
+    // !WITH_GENESYS
     'react',
     'react-dom',
     'scheduler',

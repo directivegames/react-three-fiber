@@ -8,6 +8,7 @@ overrides:
   camera-controls: 2.9.0
   react: ^19.3.0
   react-dom: ^19.3.0
+  '@react-three/fiber': workspace:@gnsx/react-three-fiber@*
 
 importers:
 
@@ -25,6 +26,9 @@ importers:
       '@babel/preset-typescript':
         specifier: ^7.28.5
         version: 7.28.5(@babel/core@7.28.6)
+      '@react-three/fiber':
+        specifier: workspace:@gnsx/react-three-fiber@*
+        version: link:packages/fiber
       '@rollup/plugin-alias':
         specifier: ^6.0.0
         version: 6.0.0(rollup@4.54.0)
@@ -158,7 +162,7 @@ importers:
         specifier: ^10.7.7
         version: 10.7.7(@react-three/fiber@packages+fiber)(@types/react@19.3.0)(@types/three@0.185.1)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(three@0.185.1)
       '@react-three/fiber':
-        specifier: workspace:*
+        specifier: workspace:@gnsx/react-three-fiber@*
         version: link:../packages/fiber
       '@react-three/tsl':
         specifier: workspace:*
@@ -308,7 +312,7 @@ importers:
         version: 19.3.0
     devDependencies:
       '@react-three/fiber':
-        specifier: workspace:*
+        specifier: workspace:@gnsx/react-three-fiber@*
         version: link:../fiber
       '@react-three/tsl':
         specifier: workspace:*
@@ -333,7 +337,7 @@ importers:
         version: 5.0.10(@types/react@19.3.0)(react@19.3.0)(use-sync-external-store@1.6.0(react@19.3.0))
     devDependencies:
       '@react-three/fiber':
-        specifier: workspace:*
+        specifier: workspace:@gnsx/react-three-fiber@*
         version: link:../fiber
       '@types/three':
         specifier: ^0.185.0
@@ -2228,7 +2232,7 @@ packages:
   '@react-three/drei@10.7.7':
     resolution: {integrity: sha512-ff+J5iloR0k4tC++QtD/j9u3w5fzfgFAWDtAGQah9pF2B1YgOq/5JxqY0/aVoQG5r3xSZz0cv5tk2YuBob4xEQ==}
     peerDependencies:
-      '@react-three/fiber': ^9.0.0
+      '@react-three/fiber': workspace:@gnsx/react-three-fiber@*
       react: ^19.3.0
       react-dom: ^19.3.0
       three: '>=0.159'
