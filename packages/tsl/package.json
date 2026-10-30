@@ -58,8 +58,8 @@
   },
   "devDependencies": {
     "@react-three/fiber": "workspace:@gnsx/react-three-fiber@*",
-    "@types/three": "^0.185.0",
+    "@types/three": "^0.186.0",
     "@webgpu/types": "^0.1.64",
-    "three": ">=0.185.0"
+    "three": "^0.186.1"
   }
 }
