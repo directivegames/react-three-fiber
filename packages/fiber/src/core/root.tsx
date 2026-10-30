@@ -214,6 +214,24 @@ function Provider<TCanvas extends HTMLCanvasElement | OffscreenCanvas>({
   return <context.Provider value={store}>{children}</context.Provider>
 }
 
+// WITH_GENESYS
+/**
+ * Break the back-links from a torn-down root's scene graph to its store. The root `Scene` is
+ * prepared in `configure()` and never passes through `removeChild`, so its `__r3f` (whose `root` is
+ * the store, and through it the renderer and canvas) survives unmount, as does that of anything
+ * added to the scene imperatively. App code that keeps such an object would pin the whole dead root.
+ * The pointer maps hold hit objects the same way. The store itself keeps its renderer and scene, so
+ * a dead root's state stays readable.
+ */
+function releaseRootRefs(state: RootState): void {
+  state.scene?.traverse((object) => {
+    delete (object as { __r3f?: unknown }).__r3f
+  })
+  state.internal.pointerMap.clear()
+  state.internal.pointerDirty.clear()
+}
+// !WITH_GENESYS
+
 /**
  * Unmount the root on `canvas`. The teardown runs once React has committed the unmount, and waits
  * for a renderer that is still being created. `callback` runs when the root is gone: after the
@@ -306,6 +324,11 @@ export function unmountComponentAtNode<TCanvas extends HTMLCanvasElement | Offsc
     // a secondary still draws with, is left alone
     const released = attempt(() => internal.releaseRenderer?.())
     internal.releaseRenderer = undefined
+
+    // WITH_GENESYS
+    // Objects the app keeps must not pin this dead root through their __r3f
+    attempt(() => releaseRootRefs(state))
+    // !WITH_GENESYS
 
     // The callback means the root is gone, so an async dispose() has to settle first
     if (callback) {
